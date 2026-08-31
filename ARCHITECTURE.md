@@ -6,7 +6,7 @@ StencilPrint is a local Tauri application. The browser layer owns file selection
 
 1. `index.html` provides the static interface and `src/main.ts` wires its controls.
 2. The frontend reads individual Gerbers as text or a ZIP as base64, auto-assigns paste/outline filenames, and builds one nested request containing `paste`, `edge`, and `settings`; 2D pad edits are carried as `excludedOpenings` during export.
-3. Tauri dispatches `preview_stencil`, `export_stencil_step`, or `export_stencil_stl` in `src-tauri/src/lib.rs`.
+3. Tauri dispatches `preview_stencil`, `save_stencil_step`, `export_stencil_step`, or `export_stencil_stl` in `src-tauri/src/lib.rs`.
 4. `gerber.rs` selects archive members and parses RS-274X primitives with `gerber_parser`, falling back to the local macro resolver for legacy macro-heavy files.
 5. `geometry.rs` traces the board outline, applies `geo` offsets/unions, and derives paste-opening polygons.
 6. Preview returns inline SVG; STEP export passes the same geometry to `step.rs`, which builds watertight B-Reps and delegates AP203 serialization to `brepkit`; STL export triangulates the same profiles in `stl.rs`.

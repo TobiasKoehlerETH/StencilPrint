@@ -8,6 +8,7 @@ For code navigation, start with [the agent guide](AGENTS.md) and [architecture o
 
 - Load a top paste Gerber (`.GTP`, `.GBR`, etc.) or a ZIP archive containing one.
 - Load the board outline Gerber from `Edge.Cuts`, or a ZIP archive containing the board files.
+- Switch between `F.Paste` and `B.Paste`; ZIP imports retry the alternate paste layer if the preferred member has no drawable geometry.
 - Preview the paste openings and the registration wall.
 - Switch to the 2D view and click individual pads to remove or restore them.
 - Tune board clearance, wall thickness, wall height, and stencil thickness.

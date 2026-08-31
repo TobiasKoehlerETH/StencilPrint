@@ -20,6 +20,14 @@ pub(crate) enum LayerKind {
     Edge,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PasteSide {
+    #[default]
+    Front,
+    Back,
+}
+
 impl LayerKind {
     fn label(self) -> &'static str {
         match self {
@@ -28,7 +36,7 @@ impl LayerKind {
         }
     }
 
-    fn archive_score(self, path: &str) -> Option<i32> {
+    fn archive_score(self, path: &str, paste_side: PasteSide) -> Option<i32> {
         let path = path.to_ascii_lowercase();
         let is_gerber = [".gbr", ".ger", ".gtp", ".gbp", ".gko", ".gm1", ".pho"]
             .iter()
@@ -37,24 +45,47 @@ impl LayerKind {
             return None;
         }
 
+        let looks_like_edge = [
+            "edge.cuts",
+            "edge_cuts",
+            "outline",
+            "profile",
+            ".gko",
+            ".gm1",
+        ]
+        .iter()
+        .any(|term| path.contains(term));
+        let looks_like_paste = ["paste", "cream", "f_paste", "b_paste"]
+            .iter()
+            .any(|term| path.contains(term));
+        match self {
+            Self::Paste if looks_like_edge => return None,
+            Self::Edge if looks_like_paste => return None,
+            _ => {}
+        }
+
         let score = match self {
             Self::Paste => {
-                let preferred = ["paste", "cream", ".gtp"]
+                let preferred = ["paste", "cream"]
                     .iter()
                     .filter(|term| path.contains(*term))
                     .count() as i32
                     * 50;
-                let top = ["top", "front", "f_paste"]
+                let front = ["top", "front", "f_paste", ".gtp"]
                     .iter()
                     .filter(|term| path.contains(*term))
                     .count() as i32
-                    * 20;
-                let bottom = ["bottom", "back", "b_paste"]
+                    * 30;
+                let back = ["bottom", "back", "b_paste", ".gbp"]
                     .iter()
                     .filter(|term| path.contains(*term))
                     .count() as i32
-                    * 20;
-                1 + preferred + top - bottom
+                    * 30;
+                1 + preferred
+                    + match paste_side {
+                        PasteSide::Front => front - back,
+                        PasteSide::Back => back - front,
+                    }
             }
             Self::Edge => {
                 let named = ["edge.cuts", "edge_cuts", "outline", "profile"]
@@ -591,9 +622,25 @@ fn rotate_point(point: Point, angle: f64) -> Point {
     }
 }
 
-pub(crate) fn parse_source(source: &LayerSource, kind: LayerKind) -> Result<ParsedLayer, String> {
-    let (data, filename) = resolve_layer_data(source, kind)?;
-    parse_layer(&data, &filename)
+pub(crate) fn parse_source(
+    source: &LayerSource,
+    kind: LayerKind,
+    paste_side: PasteSide,
+) -> Result<ParsedLayer, String> {
+    let candidates = resolve_layer_data(source, kind, paste_side)?;
+    let mut errors = Vec::new();
+    for (data, filename) in candidates {
+        match parse_layer(&data, &filename) {
+            Ok(layer) => return Ok(layer),
+            Err(error) => errors.push(format!("{filename}: {error}")),
+        }
+    }
+    Err(format!(
+        "No drawable {} Gerber geometry found in {}. Tried: {}",
+        kind.label(),
+        source.filename,
+        errors.join("; ")
+    ))
 }
 
 fn parse_layer(source: &str, filename: &str) -> Result<ParsedLayer, String> {
@@ -866,9 +913,13 @@ fn standard_aperture(
     }
 }
 
-fn resolve_layer_data(source: &LayerSource, kind: LayerKind) -> Result<(String, String), String> {
+fn resolve_layer_data(
+    source: &LayerSource,
+    kind: LayerKind,
+    paste_side: PasteSide,
+) -> Result<Vec<(String, String)>, String> {
     if !source.is_zip {
-        return Ok((source.data.clone(), source.filename.clone()));
+        return Ok(vec![(source.data.clone(), source.filename.clone())]);
     }
 
     let bytes = base64::engine::general_purpose::STANDARD
@@ -880,7 +931,7 @@ fn resolve_layer_data(source: &LayerSource, kind: LayerKind) -> Result<(String, 
             source.filename
         )
     })?;
-    let mut best: Option<(i32, usize, String)> = None;
+    let mut candidates = Vec::new();
 
     for index in 0..archive.len() {
         let Ok(entry) = archive.by_index(index) else {
@@ -890,29 +941,33 @@ fn resolve_layer_data(source: &LayerSource, kind: LayerKind) -> Result<(String, 
             continue;
         }
         let path = entry.name().to_owned();
-        let Some(score) = kind.archive_score(&path) else {
+        let Some(score) = kind.archive_score(&path, paste_side) else {
             continue;
         };
-        if best.as_ref().is_none_or(|candidate| score > candidate.0) {
-            best = Some((score, index, path));
-        }
+        candidates.push((score, index, path));
     }
 
-    let Some((_, index, member)) = best else {
+    if candidates.is_empty() {
         return Err(format!(
             "No suitable {} Gerber was found inside {}.",
             kind.label(),
             source.filename
         ));
-    };
-    let mut entry = archive
-        .by_index(index)
-        .map_err(|error| format!("Could not read {member} from {}: {error}", source.filename))?;
-    let mut text = String::new();
-    entry
-        .read_to_string(&mut text)
-        .map_err(|error| format!("Could not read {member} from {}: {error}", source.filename))?;
-    Ok((text, format!("{} → {member}", source.filename)))
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    candidates
+        .into_iter()
+        .map(|(_, index, member)| {
+            let mut entry = archive.by_index(index).map_err(|error| {
+                format!("Could not read {member} from {}: {error}", source.filename)
+            })?;
+            let mut text = String::new();
+            entry.read_to_string(&mut text).map_err(|error| {
+                format!("Could not read {member} from {}: {error}", source.filename)
+            })?;
+            Ok((text, format!("{} → {member}", source.filename)))
+        })
+        .collect()
 }
 
 fn parse_layer_legacy(source: &str, filename: &str) -> Result<ParsedLayer, String> {
@@ -1205,13 +1260,19 @@ mod tests {
     #[test]
     fn scores_expected_archive_members() {
         assert!(
-            LayerKind::Paste.archive_score("board-F_Paste.gtp")
-                > LayerKind::Paste.archive_score("board-B_Paste.gbr")
+            LayerKind::Paste.archive_score("board-F_Paste.gtp", PasteSide::Front)
+                > LayerKind::Paste.archive_score("board-B_Paste.gbr", PasteSide::Front)
         );
         assert!(
-            LayerKind::Edge.archive_score("board-Edge_Cuts.gm1")
-                > LayerKind::Edge.archive_score("copper.gbr")
+            LayerKind::Edge.archive_score("board-Edge_Cuts.gm1", PasteSide::Front)
+                > LayerKind::Edge.archive_score("copper.gbr", PasteSide::Front)
         );
+        assert!(LayerKind::Paste
+            .archive_score("board-Edge_Cuts.gm1", PasteSide::Front)
+            .is_none());
+        assert!(LayerKind::Edge
+            .archive_score("board-F_Paste.gtp", PasteSide::Front)
+            .is_none());
     }
 
     #[test]
@@ -1229,10 +1290,12 @@ mod tests {
             is_zip: true,
         };
 
-        let paste = parse_source(&source, LayerKind::Paste).unwrap();
-        let edge = parse_source(&source, LayerKind::Edge).unwrap();
+        let paste = parse_source(&source, LayerKind::Paste, PasteSide::Front).unwrap();
+        let back_paste = parse_source(&source, LayerKind::Paste, PasteSide::Back).unwrap();
+        let edge = parse_source(&source, LayerKind::Edge, PasteSide::Front).unwrap();
 
         assert!(paste.filename.ends_with("main_i2c-F_Paste.gtp"));
+        assert!(back_paste.filename.ends_with("main_i2c-B_Paste.gbp"));
         assert!(edge.filename.ends_with("main_i2c-Edge_Cuts.gm1"));
         assert!(!paste.primitives.is_empty());
         assert!(!edge.primitives.is_empty());

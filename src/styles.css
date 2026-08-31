@@ -293,6 +293,44 @@ input[type="number"]::-webkit-outer-spin-button { margin: 0; appearance: none; }
 
 .source-list { gap: 10px; }
 
+.paste-side-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.paste-side-toggle {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--background);
+}
+
+.paste-side-toggle button {
+  border: 0;
+  border-right: 1px solid var(--border);
+  padding: 4px 7px;
+  color: var(--muted-foreground);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.paste-side-toggle button:last-child {
+  border-right: 0;
+}
+
+.paste-side-toggle button:hover,
+.paste-side-toggle button.is-active {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
 .source-row {
   display: grid;
   gap: 2px;

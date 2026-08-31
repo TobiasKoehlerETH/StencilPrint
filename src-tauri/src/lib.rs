@@ -4,7 +4,7 @@ mod step;
 mod stl;
 
 use geometry::{preview_svg, StencilGeometry};
-use gerber::{parse_source, LayerKind, LayerSource, LayerStats, ParsedLayer};
+use gerber::{parse_source, LayerKind, LayerSource, LayerStats, ParsedLayer, PasteSide};
 use serde::{Deserialize, Serialize};
 use step::write_step;
 use stl::write_stl;
@@ -48,6 +48,8 @@ struct PreviewRequest {
     paste: LayerSource,
     edge: LayerSource,
     settings: StencilSettings,
+    #[serde(default)]
+    paste_side: PasteSide,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +89,13 @@ struct ExportResult {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveResult {
+    saved: bool,
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
 struct StlExportResult {
     filename: String,
     stl: String,
@@ -96,8 +105,8 @@ struct StlExportResult {
 fn parse_layers(request: &PreviewRequest) -> Result<(ParsedLayer, ParsedLayer), String> {
     request.settings.validate()?;
     Ok((
-        parse_source(&request.paste, LayerKind::Paste)?,
-        parse_source(&request.edge, LayerKind::Edge)?,
+        parse_source(&request.paste, LayerKind::Paste, request.paste_side)?,
+        parse_source(&request.edge, LayerKind::Edge, request.paste_side)?,
     ))
 }
 
@@ -132,6 +141,43 @@ fn preview_stencil(request: PreviewRequest) -> Result<PreviewResult, String> {
 
 #[tauri::command]
 fn export_stencil_step(request: ExportRequest) -> Result<ExportResult, String> {
+    build_step_export(&request)
+}
+
+#[tauri::command]
+fn save_stencil_step(request: ExportRequest) -> Result<SaveResult, String> {
+    let export = build_step_export(&request)?;
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Save STEP stencil")
+        .add_filter("STEP files", &["step", "stp"])
+        .set_file_name(&export.filename)
+        .save_file()
+    else {
+        return Ok(SaveResult {
+            saved: false,
+            path: None,
+        });
+    };
+
+    let path = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("step") || extension.eq_ignore_ascii_case("stp")
+        }) {
+        path
+    } else {
+        path.with_extension("step")
+    };
+    std::fs::write(&path, export.step.as_bytes())
+        .map_err(|error| format!("Could not save STEP file to {}: {error}", path.display()))?;
+    Ok(SaveResult {
+        saved: true,
+        path: Some(path.to_string_lossy().into_owned()),
+    })
+}
+
+fn build_step_export(request: &ExportRequest) -> Result<ExportResult, String> {
     let (paste, _, mut geometry) = geometry_for(&request.input)?;
     exclude_openings(&mut geometry, &request.excluded_openings);
     if request.mirror {
@@ -193,6 +239,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             preview_stencil,
             export_stencil_step,
+            save_stencil_step,
             export_stencil_stl
         ])
         .run(tauri::generate_context!())
@@ -257,6 +304,7 @@ mod tests {
             paste: sample_zip_source(),
             edge: sample_zip_source(),
             settings: settings(),
+            paste_side: PasteSide::Front,
         })
         .expect("sample ZIP should build a preview");
 
@@ -277,11 +325,21 @@ mod tests {
         assert!(preview.model.inner_wall.len() > 100);
         assert!(preview.model.outer_wall.len() > 100);
 
+        let back_preview = preview_stencil(PreviewRequest {
+            paste: sample_zip_source(),
+            edge: sample_zip_source(),
+            settings: settings(),
+            paste_side: PasteSide::Back,
+        })
+        .expect("sample ZIP should build a back-paste preview");
+        assert!(!back_preview.model.openings.is_empty());
+
         let export = export_stencil_step(ExportRequest {
             input: PreviewRequest {
                 paste: sample_zip_source(),
                 edge: sample_zip_source(),
                 settings: settings(),
+                paste_side: PasteSide::Front,
             },
             mirror: false,
             excluded_openings: Vec::new(),
@@ -294,11 +352,25 @@ mod tests {
         assert_eq!(export.step.matches("MANIFOLD_SOLID_BREP").count(), 2);
         assert!(export.step.ends_with("END-ISO-10303-21;\n"));
 
+        let back_step = export_stencil_step(ExportRequest {
+            input: PreviewRequest {
+                paste: sample_zip_source(),
+                edge: sample_zip_source(),
+                settings: settings(),
+                paste_side: PasteSide::Back,
+            },
+            mirror: false,
+            excluded_openings: Vec::new(),
+        })
+        .expect("sample ZIP should export a back-paste STEP stencil");
+        assert_eq!(back_step.step.matches("MANIFOLD_SOLID_BREP").count(), 2);
+
         let stl = export_stencil_stl(ExportRequest {
             input: PreviewRequest {
                 paste: sample_zip_source(),
                 edge: sample_zip_source(),
                 settings: settings(),
+                paste_side: PasteSide::Front,
             },
             mirror: false,
             excluded_openings: Vec::new(),
@@ -308,6 +380,19 @@ mod tests {
         assert!(stl.stl.starts_with("solid stencil_print\n"));
         assert!(stl.stl.contains("facet normal"));
         assert!(stl.stl.ends_with("endsolid stencil_print\n"));
+
+        let back_stl = export_stencil_stl(ExportRequest {
+            input: PreviewRequest {
+                paste: sample_zip_source(),
+                edge: sample_zip_source(),
+                settings: settings(),
+                paste_side: PasteSide::Back,
+            },
+            mirror: false,
+            excluded_openings: Vec::new(),
+        })
+        .expect("sample ZIP should export a back-paste STL stencil");
+        assert!(back_stl.stl.contains("facet normal"));
     }
 
     #[test]
@@ -324,6 +409,7 @@ mod tests {
             paste,
             edge,
             settings: settings(),
+            paste_side: PasteSide::Front,
         };
         let full = export_stencil_stl(ExportRequest {
             input,
@@ -342,6 +428,7 @@ mod tests {
                     "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.05*%\nD10*\nX00000Y00000D02*\nX100000Y00000D01*\nX100000Y100000D01*\nX00000Y100000D01*\nX00000Y00000D01*\nM02*",
                 ),
                 settings: settings(),
+                paste_side: PasteSide::Front,
             },
             mirror: false,
             excluded_openings: vec![0],

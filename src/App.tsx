@@ -6,6 +6,7 @@ import { Component, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 type LayerKind = "paste" | "edge";
+type PasteSide = "front" | "back";
 type BusyAction = "preview" | "step" | "stl";
 
 interface LayerSource {
@@ -25,6 +26,7 @@ interface StencilRequest {
   paste: LayerSource;
   edge: LayerSource;
   settings: StencilSettings;
+  pasteSide: PasteSide;
 }
 
 interface LayerStats {
@@ -65,10 +67,9 @@ interface PreviewResult {
   model: ModelGeometry;
 }
 
-interface ExportResult {
-  filename: string;
-  step: string;
-  summary: string[];
+interface SaveResult {
+  saved: boolean;
+  path?: string;
 }
 
 interface StlExportResult {
@@ -187,8 +188,15 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
     const plateMaterial = new THREE.MeshStandardMaterial({ color: 0x7bc8ee, roughness: 0.3, metalness: 0, side: THREE.DoubleSide });
     const plate = new THREE.Mesh(plateGeometry, plateMaterial);
     const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x164e78 });
-    const plateEdgesGeometry = new THREE.EdgesGeometry(plateGeometry);
-    plate.add(new THREE.LineSegments(plateEdgesGeometry, edgeMaterial));
+    const outlineGeometries: THREE.BufferGeometry[] = [];
+    const addProfileLines = (parent: THREE.Object3D, profiles: Point[][], z: number) => {
+      profiles.forEach((points) => {
+        const lineGeometry = new THREE.BufferGeometry().setFromPoints(points.map((point) => new THREE.Vector3(point.x, point.y, z)));
+        parent.add(new THREE.LineLoop(lineGeometry, edgeMaterial));
+        outlineGeometries.push(lineGeometry);
+      });
+    };
+    addProfileLines(plate, [model.plate, ...model.openings], settings.stencilThickness);
     modelGroup.add(plate);
 
     const wallShape = pathFor(model.outerWall);
@@ -201,8 +209,7 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
     const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x4fa6d8, roughness: 0.3, metalness: 0, side: THREE.DoubleSide });
     const wall = new THREE.Mesh(wallGeometry, wallMaterial);
     wall.position.z = -settings.wallHeight;
-    const wallEdgesGeometry = new THREE.EdgesGeometry(wallGeometry);
-    wall.add(new THREE.LineSegments(wallEdgesGeometry, edgeMaterial));
+    addProfileLines(wall, [model.outerWall, model.innerWall], settings.wallHeight);
     modelGroup.add(wall);
     modelGroup.position.set(-centerX, -centerY, 0);
 
@@ -250,8 +257,7 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
       controls.dispose();
       plateGeometry.dispose();
       wallGeometry.dispose();
-      plateEdgesGeometry.dispose();
-      wallEdgesGeometry.dispose();
+      outlineGeometries.forEach((geometry) => geometry.dispose());
       edgeMaterial.dispose();
       plateMaterial.dispose();
       wallMaterial.dispose();
@@ -349,7 +355,7 @@ function TwoDPreview({
           });
         }}
         onPointerDown={(event) => {
-          if (event.button !== 0) return;
+          if (event.button !== 2) return;
           suppressClickRef.current = false;
           panRef.current = {
             pointerId: event.pointerId,
@@ -384,6 +390,7 @@ function TwoDPreview({
         onPointerCancel={() => {
           panRef.current = null;
         }}
+        onContextMenu={(event) => event.preventDefault()}
         onClickCapture={(event) => {
           if (!suppressClickRef.current) return;
           event.preventDefault();
@@ -424,7 +431,7 @@ function TwoDPreview({
         <span>
           {removedOpenings.size
             ? `${removedOpenings.size} pad${removedOpenings.size === 1 ? "" : "s"} removed`
-            : "Click a pad to remove it · Drag to pan · Scroll to zoom"}
+            : "Click a pad to remove it · Right-drag to pan · Scroll to zoom"}
         </span>
         {removedOpenings.size > 0 && (
           <button type="button" onClick={onRestoreOpenings}>
@@ -482,11 +489,12 @@ export function App() {
   const [dragging, setDragging] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [viewMode, setViewMode] = useState<"3d" | "2d">("3d");
+  const [pasteSide, setPasteSide] = useState<PasteSide>("front");
   const [removedOpenings, setRemovedOpenings] = useState<Set<number>>(() => new Set());
 
   const request = useMemo<StencilRequest | null>(
-    () => (layers.paste && layers.edge ? { paste: layers.paste, edge: layers.edge, settings } : null),
-    [layers, settings],
+    () => (layers.paste && layers.edge ? { paste: layers.paste, edge: layers.edge, settings, pasteSide } : null),
+    [layers, settings, pasteSide],
   );
 
   useEffect(() => {
@@ -539,6 +547,7 @@ export function App() {
       if (!next.edge) next.edge = unassigned.shift();
       setLayers(next);
       setPreview(null);
+      setPasteSide("front");
       setRemovedOpenings(new Set());
       setSidebarOpen(true);
       setNotice(next.paste && next.edge ? "Ready" : "Add an outline layer");
@@ -572,11 +581,10 @@ export function App() {
     setNoticeError(false);
     setNotice("Exporting…");
     try {
-      const result = await invoke<ExportResult>("export_stencil_step", {
+      const result = await invoke<SaveResult>("save_stencil_step", {
         request: { ...request, mirror, excludedOpenings: [...removedOpenings] },
       });
-      download(result);
-      setNotice("STEP saved");
+      setNotice(result.saved ? "STEP saved" : "Export cancelled");
     } catch (error) {
       setNoticeError(true);
       setNotice(errorMessage(error));
@@ -621,6 +629,7 @@ export function App() {
     setPreview(null);
     setSettings(DEFAULT_SETTINGS);
     setMirror(false);
+    setPasteSide("front");
     setRemovedOpenings(new Set());
     setBusy(null);
     setNoticeError(false);
@@ -708,7 +717,14 @@ export function App() {
                   <div className="sidebar-divider" />
                   <div className="workspace-sidebar-column-heading"><span>Inputs</span></div>
                   <div className="inspector-section source-list">
-                    <div className="source-row"><span>Paste layer</span><strong title={layers.paste?.filename}>{layers.paste?.filename ?? "Not loaded"}</strong></div>
+                    <div className="paste-side-row">
+                      <span>Paste side</span>
+                      <div className="paste-side-toggle" role="group" aria-label="Paste side">
+                        <button className={cn(pasteSide === "front" && "is-active")} type="button" aria-pressed={pasteSide === "front"} onClick={() => setPasteSide("front")}>F.Paste</button>
+                        <button className={cn(pasteSide === "back" && "is-active")} type="button" aria-pressed={pasteSide === "back"} onClick={() => setPasteSide("back")}>B.Paste</button>
+                      </div>
+                    </div>
+                    <div className="source-row"><span>{pasteSide === "front" ? "F.Paste" : "B.Paste"}</span><strong title={preview?.paste.filename ?? layers.paste?.filename}>{preview?.paste.filename ?? layers.paste?.filename ?? "Not loaded"}</strong></div>
                     <div className="source-row"><span>Edge cuts</span><strong title={layers.edge?.filename}>{layers.edge?.filename ?? "Not loaded"}</strong></div>
                     <p className="source-hint">{preview ? `${preview.edge.widthMm.toFixed(1)} × ${preview.edge.heightMm.toFixed(1)} mm board` : "Add both layers to build the stencil."}</p>
                   </div>
@@ -806,10 +822,6 @@ function readFile(file: File, isZip: boolean): Promise<string> {
     if (isZip) reader.readAsDataURL(file);
     else reader.readAsText(file);
   });
-}
-
-function download(result: ExportResult) {
-  downloadText(result.filename, result.step, "application/step");
 }
 
 function downloadStl(result: StlExportResult) {

@@ -23,6 +23,7 @@ brepkit-io = "3.3"
 brepkit-math = "3.3"
 brepkit-operations = "3.3"
 brepkit-topology = "3.3"
+rfd = "0.15"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [features]
