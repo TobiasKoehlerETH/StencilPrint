@@ -1,0 +1,29 @@
+[package]
+name = "stencil-print"
+version = "0.1.0"
+description = "A board-aware Gerber paste stencil generator"
+authors = ["StencilPrint"]
+edition = "2021"
+
+[lib]
+name = "stencil_print_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.6", features = [] }
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+earcutr = "0.5"
+geo = { version = "0.33", default-features = false }
+gerber_parser = "0.5"
+brepkit-io = "3.3"
+brepkit-math = "3.3"
+brepkit-operations = "3.3"
+brepkit-topology = "3.3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
