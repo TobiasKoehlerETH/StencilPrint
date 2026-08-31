@@ -15,7 +15,7 @@ All backend commands receive a single `request` argument. The shared request sha
 }
 ```
 
-`export_stencil_step`, `save_stencil_step`, and `export_stencil_stl` also receive `mirror` and optional `excludedOpenings` indices inside that request. `save_stencil_step` opens the native file picker and returns `saved` plus the chosen `path`; STL responses contain `filename`, `stl`, and `summary`. Response fields are camel-case.
+`save_stencil_step` and `export_stencil_stl` also receive optional `excludedOpenings` indices inside that request. `save_stencil_step` opens the native file picker and returns `saved` plus the chosen `path`; STL responses contain `filename`, `stl`, and `summary`. Response fields are camel-case.
 `preview_stencil` also returns `model` geometry (`plate`, `openings`, `innerWall`, and `outerWall`) for the Three.js preview. Point fields remain `x` and `y`.
 
 ## Change guide

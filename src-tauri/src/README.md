@@ -5,7 +5,7 @@
 | `main.rs` | Native executable entry point | Application logic |
 | `lib.rs` | IPC types, validation, and command orchestration | Parsing or geometry algorithms |
 | `gerber.rs` | ZIP member selection, standard RS-274X parsing via `gerber_parser`, compatibility macro parsing, layer statistics | Stencil construction |
-| `geometry.rs` | Board tracing, offsets, openings, mirroring, preview SVG | File decoding or STEP syntax |
+| `geometry.rs` | Board tracing, offsets, openings, and preview profiles | File decoding or STEP syntax |
 | `step.rs` | Clean planar B-Rep profile construction, extrusion, and AP203 serialization via `brepkit` | Gerber interpretation |
 | `stl.rs` | Fused printable-mesh triangulation and STL serialization | Gerber interpretation |
 

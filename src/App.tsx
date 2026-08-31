@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { Box, Download, FolderOpen, Grid2X2, LoaderCircle, Printer, Settings2, Upload, X } from "lucide-react";
+import { Box, Download, FolderOpen, LoaderCircle, Printer, Settings2, Upload, X } from "lucide-react";
 import { Component, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
@@ -63,7 +63,6 @@ interface ModelGeometry {
 interface PreviewResult {
   paste: LayerStats;
   edge: LayerStats;
-  previewSvg: string;
   model: ModelGeometry;
 }
 
@@ -82,7 +81,7 @@ const DEFAULT_SETTINGS: StencilSettings = {
   clearance: 0.3,
   wallThickness: 1,
   wallHeight: 1,
-  stencilThickness: 0.4,
+  stencilThickness: 0.1,
 };
 
 const GERBER_EXTENSIONS = [".gbr", ".ger", ".gtp", ".gbp", ".gko", ".gm1", ".pho", ".gbrjob", ".edge_cuts"];
@@ -482,7 +481,6 @@ export function App() {
   const [layers, setLayers] = useState<Partial<Record<LayerKind, LayerSource>>>({});
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
-  const [mirror, setMirror] = useState(false);
   const [busy, setBusy] = useState<BusyAction | null>(null);
   const [notice, setNotice] = useState("Drop files to begin");
   const [noticeError, setNoticeError] = useState(false);
@@ -582,7 +580,7 @@ export function App() {
     setNotice("Exporting…");
     try {
       const result = await invoke<SaveResult>("save_stencil_step", {
-        request: { ...request, mirror, excludedOpenings: [...removedOpenings] },
+        request: { ...request, excludedOpenings: [...removedOpenings] },
       });
       setNotice(result.saved ? "STEP saved" : "Export cancelled");
     } catch (error) {
@@ -600,7 +598,7 @@ export function App() {
     setNotice("Exporting…");
     try {
       const result = await invoke<StlExportResult>("export_stencil_stl", {
-        request: { ...request, mirror, excludedOpenings: [...removedOpenings] },
+        request: { ...request, excludedOpenings: [...removedOpenings] },
       });
       downloadStl(result);
       setNotice("STL saved");
@@ -628,7 +626,6 @@ export function App() {
     setLayers({});
     setPreview(null);
     setSettings(DEFAULT_SETTINGS);
-    setMirror(false);
     setPasteSide("front");
     setRemovedOpenings(new Set());
     setBusy(null);
@@ -711,7 +708,7 @@ export function App() {
                     <NumberField label="Clearance" value={settings.clearance} min={0} step={0.05} onChange={(clearance) => patchSettings({ clearance })} />
                     <NumberField label="Wall" value={settings.wallThickness} min={0.5} step={0.1} onChange={(wallThickness) => patchSettings({ wallThickness })} />
                     <NumberField label="Height" value={settings.wallHeight} min={0.5} step={0.1} onChange={(wallHeight) => patchSettings({ wallHeight })} />
-                    <NumberField label="Foil" value={settings.stencilThickness} min={0.1} step={0.05} onChange={(stencilThickness) => patchSettings({ stencilThickness })} />
+                    <NumberField label="Thickness" value={settings.stencilThickness} min={0.1} step={0.05} onChange={(stencilThickness) => patchSettings({ stencilThickness })} />
                   </div>
 
                   <div className="sidebar-divider" />
@@ -736,20 +733,16 @@ export function App() {
                     <span className="inspector-label">Preview</span>
                     <div className="view-mode-group">
                       <button className={cn("view-mode-button", viewMode === "3d" && "is-active")} type="button" aria-label="3D preview" title="3D preview" aria-pressed={viewMode === "3d"} onClick={() => setViewMode("3d")}>
-                        <Box />
+                        3d
                       </button>
                       <button className={cn("view-mode-button", viewMode === "2d" && "is-active")} type="button" aria-label="2D preview" title="2D preview" aria-pressed={viewMode === "2d"} onClick={() => setViewMode("2d")}>
-                        <Grid2X2 />
+                        2d
                       </button>
                     </div>
                   </div>
                   <div className="sidebar-divider" />
                   <div className="workspace-sidebar-column-heading"><span>Build</span></div>
                   <div className="inspector-section inspector-actions">
-                    <div className="switch-row">
-                      <span>Flip underside</span>
-                      <button className={cn("switch-control", mirror && "is-active")} type="button" role="switch" aria-checked={mirror} aria-label="Flip underside" onClick={() => setMirror((current) => !current)}><span /></button>
-                    </div>
                     <button className="inspector-action" type="button" disabled={!request || busy !== null} onClick={() => void renderPreview()}>
                       {busy === "preview" ? <LoaderCircle className="spin" /> : <LoaderCircle />}
                       <span>Rebuild preview</span>

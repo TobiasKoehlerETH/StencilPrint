@@ -1,4 +1,4 @@
-use crate::gerber::{bounds, Aperture, Bounds, MacroShape, ParsedLayer, Point, Primitive};
+use crate::gerber::{Aperture, MacroShape, ParsedLayer, Point, Primitive};
 use geo::{unary_union, Area, Buffer, Contains, Coord, LineString, Point as GeoPoint, Polygon};
 use std::f64::consts::TAU;
 
@@ -35,26 +35,6 @@ impl StencilGeometry {
             inner_wall,
         })
     }
-
-    pub fn mirror_x(&mut self) {
-        let Some(size) = bounds(&self.inner_wall) else {
-            return;
-        };
-        let axis = (size.min_x + size.max_x) / 2.0;
-        for polygon in [&mut self.plate, &mut self.inner_wall, &mut self.outer_wall] {
-            mirror_polygon(polygon, axis);
-        }
-        for opening in &mut self.openings {
-            mirror_polygon(opening, axis);
-        }
-    }
-}
-
-fn mirror_polygon(points: &mut [Point], axis: f64) {
-    for point in points.iter_mut() {
-        point.x = 2.0 * axis - point.x;
-    }
-    points.reverse();
 }
 
 fn outline_from_edge(edge: &ParsedLayer, _fallback: &[Point]) -> Result<Vec<Point>, String> {
@@ -437,60 +417,10 @@ fn obround(center: Point, width: f64, height: f64) -> Vec<Point> {
         .collect()
 }
 
-pub(crate) fn preview_svg(geometry: &StencilGeometry) -> String {
-    const PADDING: f64 = 10.0;
-    const MAX_WIDTH: f64 = 390.0;
-    const MAX_HEIGHT: f64 = 304.0;
-
-    let all = geometry
-        .outer_wall
-        .iter()
-        .chain(geometry.openings.iter().flatten())
-        .copied()
-        .collect::<Vec<_>>();
-    let size = bounds(&all).unwrap_or(Bounds {
-        min_x: 0.0,
-        max_x: 100.0,
-        min_y: 0.0,
-        max_y: 100.0,
-    });
-    let scale = (MAX_WIDTH / size.width().max(1.0)).min(MAX_HEIGHT / size.height().max(1.0));
-    let width = size.width() * scale + PADDING * 2.0;
-    let height = size.height() * scale + PADDING * 2.0;
-    let transform = |points: &[Point]| svg_points(points, size, scale, height, PADDING);
-    let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width:.0} {height:.0}\"><style>.plate{{fill:#eef2f7;stroke:#7f96bd;stroke-width:1.5}}.wall{{fill:#2563eb;fill-opacity:.18;stroke:#2563eb;stroke-width:2}}.opening{{fill:#e77943;fill-opacity:.9;stroke:#c95e2f;stroke-width:.7}}</style><rect width=\"100%\" height=\"100%\" fill=\"#fbfcfd\"/><polygon class=\"plate\" points=\"{}\"/><path class=\"wall\" fill-rule=\"evenodd\" d=\"M {} Z M {} Z\"/>",
-        transform(&geometry.plate),
-        transform(&geometry.outer_wall),
-        transform(&geometry.inner_wall),
-    );
-    for opening in &geometry.openings {
-        svg.push_str(&format!(
-            "<polygon class=\"opening\" points=\"{}\"/>",
-            transform(opening)
-        ));
-    }
-    svg.push_str("</svg>");
-    svg
-}
-
-fn svg_points(points: &[Point], size: Bounds, scale: f64, height: f64, padding: f64) -> String {
-    points
-        .iter()
-        .map(|point| {
-            format!(
-                "{:.3},{:.3}",
-                (point.x - size.min_x) * scale + padding,
-                height - padding - (point.y - size.min_y) * scale
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gerber::bounds;
 
     fn layer(name: &str, points: Vec<Point>) -> ParsedLayer {
         ParsedLayer {
@@ -522,27 +452,5 @@ mod tests {
         assert_eq!(geometry.openings.len(), 1);
         assert!(bounds(&geometry.outer_wall).unwrap().width() > 10.0);
         assert!(bounds(&geometry.inner_wall).unwrap().width() > 10.0);
-    }
-
-    #[test]
-    fn mirrors_geometry_around_the_board_center() {
-        let paste = layer("paste.gtp", square(1.0, 2.0, 1.0));
-        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
-        let mut geometry = StencilGeometry::from_layers(&paste, &edge, 0.0, 1.0).unwrap();
-        geometry.mirror_x();
-
-        let opening = bounds(&geometry.openings[0]).unwrap();
-        assert_eq!((opening.min_x, opening.max_x), (8.0, 9.0));
-    }
-
-    #[test]
-    fn preview_does_not_include_measurement_label() {
-        let paste = layer("paste.gtp", square(2.0, 2.0, 1.0));
-        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
-        let geometry = StencilGeometry::from_layers(&paste, &edge, 0.3, 2.5).unwrap();
-
-        let svg = preview_svg(&geometry);
-        assert!(!svg.contains("WALL HEIGHT"));
-        assert!(svg.contains("d=\"M "));
     }
 }

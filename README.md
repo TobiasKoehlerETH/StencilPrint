@@ -12,7 +12,6 @@ For code navigation, start with [the agent guide](AGENTS.md) and [architecture o
 - Preview the paste openings and the registration wall.
 - Switch to the 2D view and click individual pads to remove or restore them.
 - Tune board clearance, wall thickness, wall height, and stencil thickness.
-- Optionally mirror the geometry for underside use.
 - Export an STL file locally for direct slicing, or a STEP file for CAD.
 
 The registration wall follows the closed Edge.Cuts contour and is printed downward from the stencil underside. Its inside boundary is expanded by the configured clearance, and its outside boundary is expanded again by the wall thickness. This supports non-rectangular board outlines; curved Gerber geometry is represented by sampled polygonal geometry before it is extruded into the printable model. Paste apertures are unioned so overlapping pads do not create invalid nested holes.
@@ -39,7 +38,7 @@ npm run build
 cd src-tauri && cargo test
 ```
 
-The light desktop shell is inspired by MoldMaker's rail/command-bar/inspector workflow, with both a 2D preview and an interactive Three.js 3D preview. The update affordance checks `VITE_UPDATE_FEED` on startup and can open a newer signed release manifest; set that variable in the build environment when a StencilPrint release feed is available. See [`.env.example`](.env.example).
+The app provides both a 2D editor and an interactive Three.js 3D preview. In the 2D view, left-click pads to remove or restore them, right-drag to pan, and use the mouse wheel to zoom.
 
 ## Geometry roadmap
 

@@ -3,7 +3,7 @@ mod gerber;
 mod step;
 mod stl;
 
-use geometry::{preview_svg, StencilGeometry};
+use geometry::StencilGeometry;
 use gerber::{parse_source, LayerKind, LayerSource, LayerStats, ParsedLayer, PasteSide};
 use serde::{Deserialize, Serialize};
 use step::write_step;
@@ -58,8 +58,6 @@ struct ExportRequest {
     #[serde(flatten)]
     input: PreviewRequest,
     #[serde(default)]
-    mirror: bool,
-    #[serde(default)]
     excluded_openings: Vec<usize>,
 }
 
@@ -68,7 +66,6 @@ struct ExportRequest {
 struct PreviewResult {
     paste: LayerStats,
     edge: LayerStats,
-    preview_svg: String,
     model: PreviewModel,
 }
 
@@ -81,11 +78,9 @@ struct PreviewModel {
     outer_wall: Vec<gerber::Point>,
 }
 
-#[derive(Serialize)]
-struct ExportResult {
+struct StepExport {
     filename: String,
     step: String,
-    summary: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -129,7 +124,6 @@ fn preview_stencil(request: PreviewRequest) -> Result<PreviewResult, String> {
     Ok(PreviewResult {
         paste: paste.stats(),
         edge: edge.stats(),
-        preview_svg: preview_svg(&geometry),
         model: PreviewModel {
             plate: geometry.plate.clone(),
             openings: geometry.openings.clone(),
@@ -137,11 +131,6 @@ fn preview_stencil(request: PreviewRequest) -> Result<PreviewResult, String> {
             outer_wall: geometry.outer_wall.clone(),
         },
     })
-}
-
-#[tauri::command]
-fn export_stencil_step(request: ExportRequest) -> Result<ExportResult, String> {
-    build_step_export(&request)
 }
 
 #[tauri::command]
@@ -177,23 +166,15 @@ fn save_stencil_step(request: ExportRequest) -> Result<SaveResult, String> {
     })
 }
 
-fn build_step_export(request: &ExportRequest) -> Result<ExportResult, String> {
-    let (paste, _, mut geometry) = geometry_for(&request.input)?;
+fn build_step_export(request: &ExportRequest) -> Result<StepExport, String> {
+    let (_, _, mut geometry) = geometry_for(&request.input)?;
     exclude_openings(&mut geometry, &request.excluded_openings);
-    if request.mirror {
-        geometry.mirror_x();
-    }
     let settings = request.input.settings;
     let step = write_step(&geometry, settings.wall_height, settings.stencil_thickness)?;
     let stem = export_stem(&request.input.paste.filename);
-    Ok(ExportResult {
+    Ok(StepExport {
         filename: format!("{stem}_stencil.step"),
         step,
-        summary: vec![
-            format!("{} paste objects", paste.primitives.len()),
-            format!("{} mm wall", settings.wall_height),
-            format!("{} mm clearance", settings.clearance),
-        ],
     })
 }
 
@@ -201,9 +182,6 @@ fn build_step_export(request: &ExportRequest) -> Result<ExportResult, String> {
 fn export_stencil_stl(request: ExportRequest) -> Result<StlExportResult, String> {
     let (paste, _, mut geometry) = geometry_for(&request.input)?;
     exclude_openings(&mut geometry, &request.excluded_openings);
-    if request.mirror {
-        geometry.mirror_x();
-    }
     let settings = request.input.settings;
     let stl = write_stl(&geometry, settings.wall_height, settings.stencil_thickness)?;
     let stem = export_stem(&request.input.paste.filename);
@@ -238,7 +216,6 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             preview_stencil,
-            export_stencil_step,
             save_stencil_step,
             export_stencil_stl
         ])
@@ -256,7 +233,7 @@ mod tests {
             clearance: 0.3,
             wall_thickness: 1.0,
             wall_height: 1.0,
-            stencil_thickness: 0.4,
+            stencil_thickness: 0.1,
         }
     }
 
@@ -308,8 +285,6 @@ mod tests {
         })
         .expect("sample ZIP should build a preview");
 
-        assert!(preview.preview_svg.starts_with("<svg"));
-        assert!(preview.preview_svg.contains("<polygon class=\"opening\""));
         assert!(preview.model.plate.len() >= 4);
         assert!(!preview.model.openings.is_empty());
         assert!(preview
@@ -334,14 +309,13 @@ mod tests {
         .expect("sample ZIP should build a back-paste preview");
         assert!(!back_preview.model.openings.is_empty());
 
-        let export = export_stencil_step(ExportRequest {
+        let export = build_step_export(&ExportRequest {
             input: PreviewRequest {
                 paste: sample_zip_source(),
                 edge: sample_zip_source(),
                 settings: settings(),
                 paste_side: PasteSide::Front,
             },
-            mirror: false,
             excluded_openings: Vec::new(),
         })
         .expect("sample ZIP should export a STEP stencil");
@@ -352,14 +326,13 @@ mod tests {
         assert_eq!(export.step.matches("MANIFOLD_SOLID_BREP").count(), 2);
         assert!(export.step.ends_with("END-ISO-10303-21;\n"));
 
-        let back_step = export_stencil_step(ExportRequest {
+        let back_step = build_step_export(&ExportRequest {
             input: PreviewRequest {
                 paste: sample_zip_source(),
                 edge: sample_zip_source(),
                 settings: settings(),
                 paste_side: PasteSide::Back,
             },
-            mirror: false,
             excluded_openings: Vec::new(),
         })
         .expect("sample ZIP should export a back-paste STEP stencil");
@@ -372,7 +345,6 @@ mod tests {
                 settings: settings(),
                 paste_side: PasteSide::Front,
             },
-            mirror: false,
             excluded_openings: Vec::new(),
         })
         .expect("sample ZIP should export an STL stencil");
@@ -388,7 +360,6 @@ mod tests {
                 settings: settings(),
                 paste_side: PasteSide::Back,
             },
-            mirror: false,
             excluded_openings: Vec::new(),
         })
         .expect("sample ZIP should export a back-paste STL stencil");
@@ -413,7 +384,6 @@ mod tests {
         };
         let full = export_stencil_stl(ExportRequest {
             input,
-            mirror: false,
             excluded_openings: Vec::new(),
         })
         .expect("inline Gerbers should export");
@@ -430,7 +400,6 @@ mod tests {
                 settings: settings(),
                 paste_side: PasteSide::Front,
             },
-            mirror: false,
             excluded_openings: vec![0],
         })
         .expect("excluding an opening should still export");
