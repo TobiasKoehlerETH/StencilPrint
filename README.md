@@ -18,30 +18,6 @@ The registration wall follows the closed Edge.Cuts contour and is printed downwa
 
 ZIP archives may contain nested folders. Select a Gerber-folder ZIP once and it fills both empty layer inputs; choosing a standalone Gerber afterward overrides that layer. The app scores archive members by their names and automatically prefers top/front paste files for the paste input and `Edge.Cuts`, outline, profile, `.GKO`, or `.GM1` files for the edge input.
 
-## Run
+## Updates and releases
 
-```sh
-npm install
-npm run tauri:dev
-```
-
-For a production build:
-
-```sh
-npm run tauri:build
-```
-
-For a quick verification pass:
-
-```sh
-npm run build
-cd src-tauri && cargo test
-```
-
-The app provides both a 2D editor and an interactive Three.js 3D preview. In the 2D view, left-click pads to remove or restore them, right-drag to pan, and use the mouse wheel to zoom.
-
-## Geometry roadmap
-
-The backend uses the MIT/Apache-licensed `gerber_parser` crate for standard RS-274X files, retains a compatibility resolver for macro-heavy legacy files, and uses `geo` for profile buffering and unioning. STEP export delegates B-Rep construction and AP203 serialization to `brepkit`, producing watertight plate and registration-wall solids that can be re-imported by brepkit's STEP reader. STL export triangulates the same profiles with `earcutr` and emits one fused printable envelope. `brepkit` 3.x is AGPL-3.0-only with a separate commercial license, so a distributed proprietary build needs the appropriate upstream license.
-
-Useful prior art includes [`gerber-stencil-3d`](https://github.com/ilkerdizbay/gerber-stencil-3d), whose registration-wall/frame behavior is a close match for this application.
+Production builds check the latest GitHub Release at startup and automatically install a newer signed version when one is available. Pushing a `v*` tag runs the Windows release workflow, which publishes the installer and updater metadata. Keep the updater signing key in GitHub Actions secrets; it must never be committed to the repository.

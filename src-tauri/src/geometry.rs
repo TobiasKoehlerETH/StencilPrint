@@ -29,7 +29,7 @@ impl StencilGeometry {
         }
         validate_openings(&inner_wall, &openings)?;
         Ok(Self {
-            plate: inner_wall.clone(),
+            plate: outer_wall.clone(),
             openings,
             outer_wall,
             inner_wall,
@@ -450,7 +450,11 @@ mod tests {
         let geometry = StencilGeometry::from_layers(&paste, &edge, 1.0, 2.0).unwrap();
 
         assert_eq!(geometry.openings.len(), 1);
-        assert!(bounds(&geometry.outer_wall).unwrap().width() > 10.0);
+        let plate_bounds = bounds(&geometry.plate).unwrap();
+        let outer_wall_bounds = bounds(&geometry.outer_wall).unwrap();
+        assert!((plate_bounds.width() - outer_wall_bounds.width()).abs() < 1e-9);
+        assert!((plate_bounds.height() - outer_wall_bounds.height()).abs() < 1e-9);
+        assert!(outer_wall_bounds.width() > 10.0);
         assert!(bounds(&geometry.inner_wall).unwrap().width() > 10.0);
     }
 }

@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Box, Download, FolderOpen, LoaderCircle, Printer, Settings2, Upload, X } from "lucide-react";
@@ -489,6 +491,28 @@ export function App() {
   const [viewMode, setViewMode] = useState<"3d" | "2d">("3d");
   const [pasteSide, setPasteSide] = useState<PasteSide>("front");
   const [removedOpenings, setRemovedOpenings] = useState<Set<number>>(() => new Set());
+
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+
+    let cancelled = false;
+    async function installAvailableUpdate() {
+      try {
+        const update = await check();
+        if (!update || cancelled) return;
+        setNotice(`Updating to ${update.version}…`);
+        await update.downloadAndInstall();
+        if (!cancelled) await relaunch();
+      } catch {
+        // Update failures must not prevent the application from starting.
+      }
+    }
+
+    void installAvailableUpdate();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const request = useMemo<StencilRequest | null>(
     () => (layers.paste && layers.edge ? { paste: layers.paste, edge: layers.edge, settings, pasteSide } : null),

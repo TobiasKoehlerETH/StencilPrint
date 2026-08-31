@@ -15,6 +15,7 @@ tauri-build = { version = "2.6", features = [] }
 [dependencies]
 tauri = { version = "2.6", features = [] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 base64 = "0.22"
 earcutr = "0.5"
 geo = { version = "0.33", default-features = false }
@@ -28,3 +29,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
