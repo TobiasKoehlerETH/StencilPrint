@@ -9,6 +9,7 @@ const CURVE_SEGMENTS: usize = 32;
 const OUTLINE_TOLERANCE: f64 = 0.01;
 const GEOMETRY_EPSILON: f64 = 1e-7;
 const RING_SIMPLIFY_TOLERANCE: f64 = 0.002;
+const NOZZLE_GAP_TOLERANCE: f64 = 1e-6;
 
 #[derive(Clone)]
 pub(crate) struct StencilGeometry {
@@ -27,8 +28,6 @@ pub(crate) struct GeometryOptions {
     pub wall_thickness: f64,
     pub shrink: f64,
     pub nozzle_diameter: f64,
-    pub enable_slotify: bool,
-    pub drop_unprintable_grids: bool,
     pub mirror_back: bool,
 }
 
@@ -52,8 +51,6 @@ impl StencilGeometry {
             wall_thickness,
             shrink,
             nozzle_diameter,
-            enable_slotify,
-            drop_unprintable_grids,
             mirror_back,
         } = options;
         let board = outline_from_edge(edge, &paste.points())?;
@@ -88,12 +85,8 @@ impl StencilGeometry {
             warnings.push(format!("Paste openings adjusted by {shrink:.2} mm shrink."));
         }
 
-        let (compensated, compensation_applied) = compensate_for_nozzle(
-            &opening_polygons,
-            nozzle_diameter,
-            enable_slotify,
-            drop_unprintable_grids,
-        );
+        let (compensated, compensation_applied) =
+            compensate_for_nozzle(&opening_polygons, nozzle_diameter);
         opening_polygons = compensated;
         if compensation_applied {
             warnings.push(format!(
@@ -591,16 +584,9 @@ fn offset_polygons(polygons: &[Vec<Point>], distance: f64) -> Vec<Vec<Point>> {
     rings_from_multi_polygon(unary_union(shapes.iter()).buffer(distance))
 }
 
-fn compensate_for_nozzle(
-    polygons: &[Vec<Point>],
-    nozzle_diameter: f64,
-    merge_close_pads: bool,
-    fill_unprintable_grids: bool,
-) -> (Vec<Vec<Point>>, bool) {
-    // The printable model must never retain a sub-nozzle wall. Keep the grid
-    // option in the IPC contract for compatibility, but the same safety pass
-    // now covers both close-pad rows and thin grids.
-    let _ = fill_unprintable_grids;
+fn compensate_for_nozzle(polygons: &[Vec<Point>], nozzle_diameter: f64) -> (Vec<Vec<Point>>, bool) {
+    // The printable model must never retain a plate web narrower than the
+    // selected nozzle. The close operation below is therefore mandatory.
     if nozzle_diameter <= GEOMETRY_EPSILON {
         return (polygons.to_vec(), false);
     }
@@ -646,9 +632,9 @@ fn compensate_for_nozzle(
         return (Vec::new(), changed);
     }
     let mut combined = union_polygons(&compensated);
-    let radius = nozzle_diameter / 2.0;
+    let radius = nozzle_diameter / 2.0 + NOZZLE_GAP_TOLERANCE;
     let merged = morphological_close(&combined, radius);
-    if merged.len() != combined.len() || !merge_close_pads {
+    if merged.len() != combined.len() {
         changed = true;
     }
     combined = merged;
@@ -662,6 +648,10 @@ fn morphological_close(polygons: &[Vec<Point>], radius: f64) -> Vec<Vec<Point>> 
     }
     let mut result = Vec::new();
     for group in polygon_groups(polygons, radius * 2.0 + GEOMETRY_EPSILON) {
+        if group.len() == 1 {
+            result.push(polygons[group[0]].clone());
+            continue;
+        }
         let shapes = group
             .into_iter()
             .filter_map(|index| polygon_from_points(&polygons[index]))
@@ -669,18 +659,9 @@ fn morphological_close(polygons: &[Vec<Point>], radius: f64) -> Vec<Vec<Point>> 
         if shapes.is_empty() {
             continue;
         }
-        let expanded = shapes
-            .into_iter()
-            .flat_map(|shape| {
-                shape
-                    .buffer(radius)
-                    .0
-                    .into_iter()
-                    .map(|polygon| points_from_linestring(polygon.exterior()))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        result.extend(union_polygons(&expanded));
+        let source = unary_union(shapes.iter());
+        let closed = source.buffer(radius).buffer(-radius);
+        result.extend(rings_from_multi_polygon(closed));
     }
     result
 }
@@ -785,14 +766,14 @@ fn obround(center: Point, width: f64, height: f64) -> Vec<Point> {
             let angle = TAU * index as f64 / CURVE_SEGMENTS as f64;
             let x_offset = if vertical {
                 0.0
-            } else if angle.sin() >= 0.0 {
+            } else if angle.cos() >= 0.0 {
                 straight / 2.0
             } else {
                 -straight / 2.0
             };
             let y_offset = if !vertical {
                 0.0
-            } else if angle.cos() >= 0.0 {
+            } else if angle.sin() >= 0.0 {
                 straight / 2.0
             } else {
                 -straight / 2.0
@@ -835,8 +816,6 @@ mod tests {
         clearance: f64,
         wall_thickness: f64,
         nozzle_diameter: f64,
-        enable_slotify: bool,
-        drop_unprintable_grids: bool,
         mirror_back: bool,
     ) -> GeometryOptions {
         GeometryOptions {
@@ -844,8 +823,6 @@ mod tests {
             wall_thickness,
             shrink: 0.0,
             nozzle_diameter,
-            enable_slotify,
-            drop_unprintable_grids,
             mirror_back,
         }
     }
@@ -855,8 +832,7 @@ mod tests {
         let paste = layer("paste.gtp", square(2.0, 2.0, 1.0));
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
         let geometry =
-            StencilGeometry::from_layers(&paste, &edge, options(1.0, 2.0, 0.4, true, true, false))
-                .unwrap();
+            StencilGeometry::from_layers(&paste, &edge, options(1.0, 2.0, 0.4, false)).unwrap();
 
         assert_eq!(geometry.openings.len(), 1);
         let plate_bounds = bounds(&geometry.plate).unwrap();
@@ -881,8 +857,7 @@ mod tests {
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
 
         let geometry =
-            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, true, true, false))
-                .unwrap();
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, false)).unwrap();
 
         assert_eq!(geometry.openings.len(), 1);
         assert!(geometry
@@ -905,27 +880,54 @@ mod tests {
             warnings: Vec::new(),
         };
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
-        let geometry = StencilGeometry::from_layers(
-            &paste,
-            &edge,
-            options(0.0, 1.0, 0.4, false, false, false),
-        )
-        .unwrap();
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, false)).unwrap();
 
         assert_eq!(geometry.selection_openings.len(), 4);
         assert_eq!(geometry.openings.len(), 3);
     }
 
     #[test]
+    fn preserves_isolated_opening_dimensions_when_closing_gaps() {
+        let paste = layer("paste.gtp", square(2.0, 2.0, 1.0));
+        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, false)).unwrap();
+
+        let opening_bounds = bounds(&geometry.openings[0]).unwrap();
+        assert!((opening_bounds.width() - 1.0).abs() < 0.01);
+        assert!((opening_bounds.height() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn preserves_thin_isolated_pad_profile_when_closing_gaps() {
+        let paste = layer("paste.gtp", rectangle(Point { x: 2.0, y: 2.0 }, 1.0, 0.1));
+        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.2, false)).unwrap();
+
+        let opening_bounds = bounds(&geometry.openings[0]).unwrap();
+        assert!(opening_bounds.width() > 0.9);
+        assert!(opening_bounds.height() > 0.15);
+    }
+
+    #[test]
+    fn builds_horizontal_and_vertical_obrounds_without_crossing_edges() {
+        let horizontal = obround(Point { x: 0.0, y: 0.0 }, 1.0, 0.2);
+        assert!((horizontal[16].x + 0.5).abs() < 1e-9);
+        assert!(horizontal[16].y.abs() < 1e-9);
+
+        let vertical = obround(Point { x: 0.0, y: 0.0 }, 0.2, 1.0);
+        assert!((vertical[16].x + 0.1).abs() < 1e-9);
+        assert!((vertical[16].y - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
     fn keeps_the_perimeter_wall_at_least_one_nozzle_wide() {
         let paste = layer("paste.gtp", square(2.0, 2.0, 1.0));
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
-        let geometry = StencilGeometry::from_layers(
-            &paste,
-            &edge,
-            options(0.0, 0.1, 0.8, false, false, false),
-        )
-        .unwrap();
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 0.1, 0.8, false)).unwrap();
 
         assert!(bounds(&geometry.plate).unwrap().width() >= 11.6 - 1e-6);
         assert!(geometry
@@ -938,12 +940,8 @@ mod tests {
     fn clips_paste_outside_the_board_clearance() {
         let paste = layer("paste.gtp", square(9.5, 4.0, 2.0));
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
-        let geometry = StencilGeometry::from_layers(
-            &paste,
-            &edge,
-            options(0.0, 1.0, 0.4, false, false, false),
-        )
-        .unwrap();
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, false)).unwrap();
         assert!(geometry
             .warnings
             .iter()
@@ -956,8 +954,7 @@ mod tests {
         let paste = layer("paste.gtp", square(1.0, 2.0, 1.0));
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
         let geometry =
-            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.0, false, false, true))
-                .unwrap();
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.0, true)).unwrap();
         let bounds = crate::gerber::bounds(&geometry.openings[0]).unwrap();
         assert!((bounds.min_x - 8.0).abs() < 1e-6);
         assert!((bounds.max_x - 9.0).abs() < 1e-6);

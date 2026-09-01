@@ -24,8 +24,6 @@ interface StencilSettings {
   stencilThickness: number;
   shrink: number;
   nozzleDiameter: number;
-  enableSlotify: boolean;
-  dropUnprintableGrids: boolean;
 }
 
 interface StencilRequest {
@@ -95,8 +93,6 @@ const DEFAULT_SETTINGS: StencilSettings = {
   stencilThickness: 0.4,
   shrink: 0,
   nozzleDiameter: 0.2,
-  enableSlotify: true,
-  dropUnprintableGrids: true,
 };
 
 const GERBER_EXTENSIONS = [".gbr", ".ger", ".gtp", ".gbp", ".gko", ".gm1", ".pho", ".gbrjob", ".edge_cuts"];
@@ -145,32 +141,6 @@ function NumberField({
       />
       <em>mm</em>
     </label>
-  );
-}
-
-function ToggleField({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <div className="switch-row">
-      <span>{label}</span>
-      <button
-        className={classNames("switch-control", value && "is-active")}
-        type="button"
-        role="switch"
-        aria-checked={value}
-        aria-label={label}
-        onClick={() => onChange(!value)}
-      >
-        <span />
-      </button>
-    </div>
   );
 }
 
@@ -802,8 +772,6 @@ export function App() {
                   <div className="inspector-section">
                     <NumberField label="Shrink" value={settings.shrink} min={-0.2} step={0.05} onChange={(shrink) => patchSettings({ shrink })} />
                     <NumberField label="Nozzle" value={settings.nozzleDiameter} min={0.1} step={0.05} onChange={(nozzleDiameter) => patchSettings({ nozzleDiameter })} />
-                    <ToggleField label="Merge close pads" value={settings.enableSlotify} onChange={(enableSlotify) => patchSettings({ enableSlotify })} />
-                    <ToggleField label="Fill thin grids" value={settings.dropUnprintableGrids} onChange={(dropUnprintableGrids) => patchSettings({ dropUnprintableGrids })} />
                   </div>
 
                   <div className="sidebar-divider" />

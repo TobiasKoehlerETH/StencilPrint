@@ -24,7 +24,7 @@ For a frontend-only development server, use `npm run dev:frontend`. A production
 - Preview the paste openings and registration wall.
 - Switch to the 2D view and click individual pads to remove or restore them.
 - Tune board clearance, wall thickness, wall height, stencil thickness, opening shrink, and nozzle diameter.
-- Enable automatic merging of close pads and filling of thin grids so the generated openings remain printable with the selected nozzle.
+- The generated openings automatically remove plate gaps smaller than the selected nozzle diameter.
 - Use the export menu to choose STL for slicing or STEP for CAD; both formats open a native save dialog.
 
 The preview rebuilds automatically after importing layers or changing settings. There is no separate rebuild action.
@@ -34,6 +34,16 @@ The registration wall follows the closed Edge.Cuts contour and is printed downwa
 ZIP archives may contain nested folders. Select a Gerber-folder ZIP once and it fills both empty layer inputs; choosing a standalone Gerber afterward overrides that layer. The app scores archive members by their names and automatically prefers top/front paste files for the paste input and `Edge.Cuts`, outline, profile, `.GKO`, or `.GM1` files for the edge input.
 
 The nozzle compensation default is `0.2 mm` and the accepted range is `0.1–0.8 mm`. The continuous registration wall is printed downward from the stencil underside using the configured wall height.
+
+## Screenshots
+
+### 3D preview
+
+![StencilPrint 3D preview](docs/screenshots/sh1.png)
+
+### 2D pad preview
+
+![StencilPrint 2D pad preview](docs/screenshots/sh2.png)
 
 ## Project guides
 

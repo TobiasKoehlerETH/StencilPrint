@@ -18,8 +18,6 @@ struct StencilSettings {
     stencil_thickness: f64,
     shrink: f64,
     nozzle_diameter: f64,
-    enable_slotify: bool,
-    drop_unprintable_grids: bool,
 }
 
 impl StencilSettings {
@@ -131,8 +129,6 @@ fn geometry_for(
         wall_thickness: settings.wall_thickness,
         shrink: settings.shrink,
         nozzle_diameter: settings.nozzle_diameter,
-        enable_slotify: settings.enable_slotify,
-        drop_unprintable_grids: settings.drop_unprintable_grids,
         mirror_back: matches!(request.paste_side, PasteSide::Back),
     };
     let geometry = if excluded_openings.is_empty() {
@@ -279,8 +275,6 @@ mod tests {
             stencil_thickness: 0.4,
             shrink: 0.0,
             nozzle_diameter: 0.2,
-            enable_slotify: true,
-            drop_unprintable_grids: true,
         }
     }
 

@@ -27,7 +27,7 @@ Both preview and export must use `StencilGeometry::from_layers`; keeping one geo
 
 ## IPC contract
 
-All three Tauri commands accept a request with `paste`, `edge`, `settings`, and `pasteSide`. Export requests additionally carry optional `excludedOpenings` indices. Settings use camel-case names in the browser and include clearance, wall, height, stencil thickness, shrink, nozzle compensation, and pad/grid handling.
+All three Tauri commands accept a request with `paste`, `edge`, `settings`, and `pasteSide`. Export requests additionally carry optional `excludedOpenings` indices. Settings use camel-case names in the browser and include clearance, wall, height, stencil thickness, shrink, and nozzle compensation. Geometry always removes plate gaps smaller than the configured nozzle diameter.
 
 `preview_stencil` returns layer statistics plus `model` profiles: `plate`, fused `openings`, un-fused `selectionOpenings`, `openingSources`, `innerWall`, `outerWall`, and `warnings`. Both export commands open a native file picker and return `saved` plus the chosen `path`; the generated file content never passes through the browser.
 
