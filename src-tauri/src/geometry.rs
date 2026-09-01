@@ -58,7 +58,8 @@ impl StencilGeometry {
         } = options;
         let board = outline_from_edge(edge, &paste.points())?;
         let inner_wall = offset_polygon(&board, clearance)?;
-        let outer_wall = offset_polygon(&board, clearance + wall_thickness)?;
+        let effective_wall_thickness = wall_thickness.max(nozzle_diameter);
+        let outer_wall = offset_polygon(&board, clearance + effective_wall_thickness)?;
         let mut warnings = Vec::new();
         let mut paste_polygons = primitive_polygons(paste);
         if mirror_back {
@@ -97,6 +98,11 @@ impl StencilGeometry {
         if compensation_applied {
             warnings.push(format!(
                 "Nozzle compensation applied for a {nozzle_diameter:.2} mm nozzle."
+            ));
+        }
+        if effective_wall_thickness > wall_thickness + GEOMETRY_EPSILON {
+            warnings.push(format!(
+                "Perimeter wall increased to the {nozzle_diameter:.2} mm nozzle diameter."
             ));
         }
 
@@ -591,6 +597,10 @@ fn compensate_for_nozzle(
     merge_close_pads: bool,
     fill_unprintable_grids: bool,
 ) -> (Vec<Vec<Point>>, bool) {
+    // The printable model must never retain a sub-nozzle wall. Keep the grid
+    // option in the IPC contract for compatibility, but the same safety pass
+    // now covers both close-pad rows and thin grids.
+    let _ = fill_unprintable_grids;
     if nozzle_diameter <= GEOMETRY_EPSILON {
         return (polygons.to_vec(), false);
     }
@@ -636,22 +646,13 @@ fn compensate_for_nozzle(
         return (Vec::new(), changed);
     }
     let mut combined = union_polygons(&compensated);
-    if merge_close_pads {
-        let radius = nozzle_diameter / 2.0;
-        let merged = morphological_close(&combined, radius);
-        if merged.len() != combined.len() {
-            changed = true;
-        }
-        combined = merged;
+    let radius = nozzle_diameter / 2.0;
+    let merged = morphological_close(&combined, radius);
+    if merged.len() != combined.len() || !merge_close_pads {
+        changed = true;
     }
+    combined = merged;
 
-    if fill_unprintable_grids && !merge_close_pads {
-        let filled = morphological_close(&combined, nozzle_diameter / 2.0);
-        if filled.len() != combined.len() {
-            changed = true;
-        }
-        combined = filled;
-    }
     (combined, changed)
 }
 
@@ -904,12 +905,33 @@ mod tests {
             warnings: Vec::new(),
         };
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
-        let geometry =
-            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, true, false, false))
-                .unwrap();
+        let geometry = StencilGeometry::from_layers(
+            &paste,
+            &edge,
+            options(0.0, 1.0, 0.4, false, false, false),
+        )
+        .unwrap();
 
         assert_eq!(geometry.selection_openings.len(), 4);
         assert_eq!(geometry.openings.len(), 3);
+    }
+
+    #[test]
+    fn keeps_the_perimeter_wall_at_least_one_nozzle_wide() {
+        let paste = layer("paste.gtp", square(2.0, 2.0, 1.0));
+        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
+        let geometry = StencilGeometry::from_layers(
+            &paste,
+            &edge,
+            options(0.0, 0.1, 0.8, false, false, false),
+        )
+        .unwrap();
+
+        assert!(bounds(&geometry.plate).unwrap().width() >= 11.6 - 1e-6);
+        assert!(geometry
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Perimeter wall increased")));
     }
 
     #[test]
