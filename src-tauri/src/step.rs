@@ -132,6 +132,8 @@ mod tests {
         let geometry = StencilGeometry {
             plate: square(10.0),
             openings: vec![square(1.0)],
+            selection_openings: vec![square(1.0)],
+            opening_sources: vec![vec![0]],
             inner_wall: square(10.0),
             outer_wall: square(12.0),
             warnings: Vec::new(),

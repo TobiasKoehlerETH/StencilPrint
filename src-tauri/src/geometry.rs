@@ -8,11 +8,14 @@ use std::f64::consts::TAU;
 const CURVE_SEGMENTS: usize = 32;
 const OUTLINE_TOLERANCE: f64 = 0.01;
 const GEOMETRY_EPSILON: f64 = 1e-7;
+const RING_SIMPLIFY_TOLERANCE: f64 = 0.002;
 
 #[derive(Clone)]
 pub(crate) struct StencilGeometry {
     pub plate: Vec<Point>,
     pub openings: Vec<Vec<Point>>,
+    pub selection_openings: Vec<Vec<Point>>,
+    pub opening_sources: Vec<Vec<usize>>,
     pub inner_wall: Vec<Point>,
     pub outer_wall: Vec<Point>,
     pub warnings: Vec<String>,
@@ -35,6 +38,15 @@ impl StencilGeometry {
         edge: &ParsedLayer,
         options: GeometryOptions,
     ) -> Result<Self, String> {
+        Self::from_layers_excluding(paste, edge, options, &[])
+    }
+
+    pub fn from_layers_excluding(
+        paste: &ParsedLayer,
+        edge: &ParsedLayer,
+        options: GeometryOptions,
+        excluded_openings: &[usize],
+    ) -> Result<Self, String> {
         let GeometryOptions {
             clearance,
             wall_thickness,
@@ -53,9 +65,15 @@ impl StencilGeometry {
             mirror_polygons(&mut paste_polygons, &board);
             warnings.push("Back paste mirrored around the board centre for registration.".into());
         }
+        let selection_openings = paste_polygons.clone();
+        paste_polygons = paste_polygons
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, polygon)| (!excluded_openings.contains(&index)).then_some(polygon))
+            .collect();
         let raw_opening_count = paste_polygons.len();
         let mut opening_polygons = union_polygons(&paste_polygons);
-        if opening_polygons.is_empty() {
+        if opening_polygons.is_empty() && excluded_openings.is_empty() {
             return Err("The paste layer contains no printable pad openings.".into());
         }
 
@@ -87,7 +105,7 @@ impl StencilGeometry {
             warnings.push("Paste geometry outside the board clearance was clipped.".into());
         }
         let openings = opening_polygons;
-        if openings.is_empty() {
+        if openings.is_empty() && excluded_openings.is_empty() {
             return Err("The paste layer contains no printable pad openings.".into());
         }
         validate_openings(&inner_wall, &openings)?;
@@ -98,9 +116,12 @@ impl StencilGeometry {
                 openings.len()
             ));
         }
+        let opening_sources = map_opening_sources(&selection_openings, &openings);
         Ok(Self {
             plate: outer_wall.clone(),
             openings,
+            selection_openings,
+            opening_sources,
             outer_wall,
             inner_wall,
             warnings,
@@ -278,7 +299,46 @@ fn points_from_linestring(linestring: &LineString<f64>) -> Vec<Point> {
     if points.len() > 1 && points_are_close(points[0], *points.last().unwrap()) {
         points.pop();
     }
-    points
+    simplify_ring(points)
+}
+
+fn simplify_ring(mut points: Vec<Point>) -> Vec<Point> {
+    if points.len() < 4 {
+        return points;
+    }
+    loop {
+        let mut removed = false;
+        let count = points.len();
+        for index in 0..count {
+            let previous = points[(index + count - 1) % count];
+            let current = points[index];
+            let next = points[(index + 1) % count];
+            if point_segment_distance(current, previous, next) <= RING_SIMPLIFY_TOLERANCE {
+                points.remove(index);
+                removed = true;
+                break;
+            }
+        }
+        if !removed || points.len() < 4 {
+            return points;
+        }
+    }
+}
+
+fn point_segment_distance(point: Point, start: Point, end: Point) -> f64 {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let length_squared = dx * dx + dy * dy;
+    if length_squared <= GEOMETRY_EPSILON {
+        return (point.x - start.x).hypot(point.y - start.y);
+    }
+    let projection =
+        (((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared).clamp(0.0, 1.0);
+    let closest = Point {
+        x: start.x + projection * dx,
+        y: start.y + projection * dy,
+    };
+    (point.x - closest.x).hypot(point.y - closest.y)
 }
 
 fn mirror_polygons(polygons: &mut [Vec<Point>], board: &[Point]) {
@@ -301,21 +361,15 @@ fn mirror_polygons(polygons: &mut [Vec<Point>], board: &[Point]) {
 fn primitive_polygons(layer: &ParsedLayer) -> Vec<Vec<Point>> {
     let mut polygons = Vec::new();
     for primitive in &layer.primitives {
-        match primitive {
-            Primitive::Flash(point, aperture) => {
-                polygons.extend(aperture_polygons(*point, aperture));
-            }
-            Primitive::Region(points) if points.len() >= 3 => polygons.push(points.clone()),
-            Primitive::Stroke(start, end, aperture) => {
-                polygons.extend(stroke_polygons(*start, *end, aperture));
-            }
-            _ => {}
-        }
+        let primitive_shapes = match primitive {
+            Primitive::Flash(point, aperture) => aperture_polygons(*point, aperture),
+            Primitive::Region(points) if points.len() >= 3 => vec![points.clone()],
+            Primitive::Stroke(start, end, aperture) => stroke_polygons(*start, *end, aperture),
+            _ => Vec::new(),
+        };
+        polygons.extend(union_polygons(&primitive_shapes));
     }
     polygons
-        .into_iter()
-        .filter(|polygon| polygon.len() >= 3 && signed_area(polygon).abs() > 1e-9)
-        .collect()
 }
 
 fn aperture_polygons(center: Point, aperture: &Aperture) -> Vec<Vec<Point>> {
@@ -410,14 +464,111 @@ fn stroke_polygon(start: Point, end: Point, width: f64) -> Vec<Vec<Point>> {
 }
 
 fn union_polygons(polygons: &[Vec<Point>]) -> Vec<Vec<Point>> {
-    let shapes = polygons
+    union_polygon_groups(polygons, 0.0)
+}
+
+fn union_polygon_groups(polygons: &[Vec<Point>], margin: f64) -> Vec<Vec<Point>> {
+    let polygons = polygons
         .iter()
-        .filter_map(|points| polygon_from_points(points))
+        .filter(|points| points.len() >= 3)
+        .cloned()
         .collect::<Vec<_>>();
-    if shapes.is_empty() {
-        return Vec::new();
+    let groups = polygon_groups(&polygons, margin);
+    let mut result = Vec::new();
+    for group in groups {
+        let shapes = group
+            .into_iter()
+            .filter_map(|index| polygon_from_points(&polygons[index]))
+            .collect::<Vec<_>>();
+        if !shapes.is_empty() {
+            result.extend(rings_from_multi_polygon(unary_union(shapes.iter())));
+        }
     }
-    rings_from_multi_polygon(unary_union(shapes.iter()))
+    result
+}
+
+fn polygon_groups(polygons: &[Vec<Point>], margin: f64) -> Vec<Vec<usize>> {
+    let bounds = polygons
+        .iter()
+        .filter_map(|points| polygon_bounds(points))
+        .collect::<Vec<_>>();
+    let mut groups = Vec::<Vec<usize>>::new();
+    let mut assigned = vec![false; bounds.len()];
+    for start in 0..bounds.len() {
+        if assigned[start] {
+            continue;
+        }
+        assigned[start] = true;
+        let mut group = vec![start];
+        let mut cursor = 0;
+        while cursor < group.len() {
+            let current = group[cursor];
+            for candidate in 0..bounds.len() {
+                if !assigned[candidate]
+                    && bounds_overlap(bounds[current], bounds[candidate], margin)
+                {
+                    assigned[candidate] = true;
+                    group.push(candidate);
+                }
+            }
+            cursor += 1;
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+#[derive(Clone, Copy)]
+struct PolygonBounds {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+}
+
+fn polygon_bounds(points: &[Point]) -> Option<PolygonBounds> {
+    let first = points.first()?;
+    Some(points.iter().skip(1).fold(
+        PolygonBounds {
+            min_x: first.x,
+            max_x: first.x,
+            min_y: first.y,
+            max_y: first.y,
+        },
+        |bounds, point| PolygonBounds {
+            min_x: bounds.min_x.min(point.x),
+            max_x: bounds.max_x.max(point.x),
+            min_y: bounds.min_y.min(point.y),
+            max_y: bounds.max_y.max(point.y),
+        },
+    ))
+}
+
+fn bounds_overlap(left: PolygonBounds, right: PolygonBounds, margin: f64) -> bool {
+    left.min_x <= right.max_x + margin
+        && left.max_x + margin >= right.min_x
+        && left.min_y <= right.max_y + margin
+        && left.max_y + margin >= right.min_y
+}
+
+fn map_opening_sources(source_openings: &[Vec<Point>], openings: &[Vec<Point>]) -> Vec<Vec<usize>> {
+    openings
+        .iter()
+        .filter_map(|points| polygon_bounds(points))
+        .map(|opening_bounds| {
+            source_openings
+                .iter()
+                .enumerate()
+                .filter_map(|(index, source)| {
+                    polygon_bounds(source)
+                        .filter(|source_bounds| {
+                            bounds_overlap(*source_bounds, opening_bounds, 1e-6)
+                        })
+                        .map(|_| index)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn offset_polygons(polygons: &[Vec<Point>], distance: f64) -> Vec<Vec<Point>> {
@@ -470,38 +621,67 @@ fn compensate_for_nozzle(
         let widen = ((nozzle_diameter - narrowest) / 2.0).max(0.0);
         if widen > GEOMETRY_EPSILON {
             changed = true;
-            compensated.extend(shape.buffer(widen).0);
+            compensated.extend(
+                shape
+                    .buffer(widen)
+                    .0
+                    .into_iter()
+                    .map(|polygon| points_from_linestring(polygon.exterior())),
+            );
         } else {
-            compensated.push(shape);
+            compensated.push(polygon.clone());
         }
     }
     if compensated.is_empty() {
         return (Vec::new(), changed);
     }
-
-    let mut combined = unary_union(compensated.iter());
+    let mut combined = union_polygons(&compensated);
     if merge_close_pads {
         let radius = nozzle_diameter / 2.0;
-        let merged = combined.buffer(radius).buffer(-radius);
-        if merged.0.len() != combined.0.len() {
+        let merged = morphological_close(&combined, radius);
+        if merged.len() != combined.len() {
             changed = true;
         }
         combined = merged;
     }
 
-    if fill_unprintable_grids {
-        let filled = fill_thin_grid_gaps(&combined, nozzle_diameter);
-        if filled.0.len() != combined.0.len() {
+    if fill_unprintable_grids && !merge_close_pads {
+        let filled = morphological_close(&combined, nozzle_diameter / 2.0);
+        if filled.len() != combined.len() {
             changed = true;
         }
         combined = filled;
     }
-    (rings_from_multi_polygon(combined), changed)
+    (combined, changed)
 }
 
-fn fill_thin_grid_gaps(shape: &MultiPolygon<f64>, nozzle_diameter: f64) -> MultiPolygon<f64> {
-    let radius = nozzle_diameter / 2.0;
-    shape.buffer(radius).buffer(-radius)
+fn morphological_close(polygons: &[Vec<Point>], radius: f64) -> Vec<Vec<Point>> {
+    if radius <= GEOMETRY_EPSILON {
+        return polygons.to_vec();
+    }
+    let mut result = Vec::new();
+    for group in polygon_groups(polygons, radius * 2.0 + GEOMETRY_EPSILON) {
+        let shapes = group
+            .into_iter()
+            .filter_map(|index| polygon_from_points(&polygons[index]))
+            .collect::<Vec<_>>();
+        if shapes.is_empty() {
+            continue;
+        }
+        let expanded = shapes
+            .into_iter()
+            .flat_map(|shape| {
+                shape
+                    .buffer(radius)
+                    .0
+                    .into_iter()
+                    .map(|polygon| points_from_linestring(polygon.exterior()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        result.extend(union_polygons(&expanded));
+    }
+    result
 }
 
 fn clip_openings(
@@ -514,6 +694,13 @@ fn clip_openings(
         .collect::<Vec<_>>();
     let boundary = polygon_from_points(boundary)
         .ok_or_else(|| "The printable plate outline is degenerate.".to_string())?;
+    if openings.iter().all(|opening| {
+        opening
+            .iter()
+            .all(|point| boundary.contains(&GeoPoint::new(point.x, point.y)))
+    }) {
+        return Ok((openings.to_vec(), false));
+    }
     let source = unary_union(opening_shapes.iter());
     let source_area = source.unsigned_area();
     let clipped = source.intersection(&boundary);
@@ -701,6 +888,28 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("Nozzle compensation")));
+    }
+
+    #[test]
+    fn merges_only_gaps_smaller_than_the_selected_nozzle() {
+        let paste = ParsedLayer {
+            filename: "paste.gtp".into(),
+            units: "mm".into(),
+            primitives: vec![
+                Primitive::Region(square(1.0, 1.0, 1.0)),
+                Primitive::Region(square(2.39, 1.0, 1.0)),
+                Primitive::Region(square(1.0, 4.0, 1.0)),
+                Primitive::Region(square(2.41, 4.0, 1.0)),
+            ],
+            warnings: Vec::new(),
+        };
+        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, true, false, false))
+                .unwrap();
+
+        assert_eq!(geometry.selection_openings.len(), 4);
+        assert_eq!(geometry.openings.len(), 3);
     }
 
     #[test]

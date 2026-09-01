@@ -1,6 +1,6 @@
 [package]
 name = "stencil-print"
-version = "0.1.0"
+version = "0.1.1"
 description = "A board-aware Gerber paste stencil generator"
 authors = ["StencilPrint"]
 edition = "2021"

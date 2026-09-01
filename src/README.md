@@ -21,7 +21,7 @@ All backend commands receive a single `request` argument. The shared request sha
 ```
 
 `save_stencil_step` and `save_stencil_stl` also receive optional `excludedOpenings` indices inside that request. Both commands open the native file picker and return `saved` plus the chosen `path`. Response fields are camel-case.
-`preview_stencil` also returns `model` geometry (`plate`, `openings`, `innerWall`, `outerWall`, and `warnings`) for the Three.js preview. Point fields remain `x` and `y`. The default `nozzleDiameter` is `0.2`; the backend accepts values from `0.1` through `0.8` mm.
+`preview_stencil` also returns `model` geometry (`plate`, fused printable `openings`, un-fused `selectionOpenings`, `openingSources`, `innerWall`, `outerWall`, and `warnings`) for the previews. Point fields remain `x` and `y`. The default `nozzleDiameter` is `0.2`; the backend accepts values from `0.1` through `0.8` mm.
 
 The preview model is shared by both view modes. The 3D view extrudes the profiles in Three.js; the 2D view supports zoom, right-drag panning, and per-opening removal. Removed opening indices are sent only with export requests.
 

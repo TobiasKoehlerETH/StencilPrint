@@ -70,6 +70,8 @@ interface ModelBounds {
 interface ModelGeometry {
   plate: Point[];
   openings: Point[][];
+  selectionOpenings: Point[][];
+  openingSources: number[][];
   innerWall: Point[];
   outerWall: Point[];
   warnings: string[];
@@ -466,7 +468,7 @@ function TwoDPreview({
         <polygon className="plate" points={pointsFor(model.plate)} />
         <path className="wall" fillRule="evenodd" d={`M ${pointsFor(model.outerWall)} Z M ${pointsFor(model.innerWall, true)} Z`} />
         <g className="opening-layer">
-          {model.openings.map((opening, index) => {
+          {model.selectionOpenings.map((opening, index) => {
             const removed = removedOpenings.has(index);
             return (
               <polygon
@@ -651,7 +653,7 @@ export function App() {
     try {
       const result = await invoke<PreviewResult>("preview_stencil", { request: input });
       setPreview(result);
-      setRemovedOpenings((current) => new Set([...current].filter((index) => index < result.model.openings.length)));
+      setRemovedOpenings((current) => new Set([...current].filter((index) => index < result.model.selectionOpenings.length)));
       setNotice("Ready");
     } catch (error) {
       setNoticeError(true);
@@ -722,7 +724,9 @@ export function App() {
   const visibleModel = preview
     ? {
         ...preview.model,
-        openings: preview.model.openings.filter((_, index) => !removedOpenings.has(index)),
+        openings: preview.model.openings.filter((_, index) =>
+          !(preview.model.openingSources[index] ?? []).some((sourceIndex) => removedOpenings.has(sourceIndex)),
+        ),
       }
     : null;
 

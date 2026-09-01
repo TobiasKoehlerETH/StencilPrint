@@ -88,6 +88,8 @@ struct PreviewResult {
 struct PreviewModel {
     plate: Vec<gerber::Point>,
     openings: Vec<Vec<gerber::Point>>,
+    selection_openings: Vec<Vec<gerber::Point>>,
+    opening_sources: Vec<Vec<usize>>,
     inner_wall: Vec<gerber::Point>,
     outer_wall: Vec<gerber::Point>,
     warnings: Vec<String>,
@@ -120,41 +122,38 @@ fn parse_layers(request: &PreviewRequest) -> Result<(ParsedLayer, ParsedLayer), 
 
 fn geometry_for(
     request: &PreviewRequest,
+    excluded_openings: &[usize],
 ) -> Result<(ParsedLayer, ParsedLayer, StencilGeometry), String> {
-    let started = std::time::Instant::now();
     let (paste, edge) = parse_layers(request)?;
-    eprintln!(
-        "stencil profile parsed paste={} edge={} in {:?}",
-        paste.primitives.len(),
-        edge.primitives.len(),
-        started.elapsed()
-    );
     let settings = request.settings;
-    let geometry = StencilGeometry::from_layers(
-        &paste,
-        &edge,
-        GeometryOptions {
-            clearance: settings.clearance,
-            wall_thickness: settings.wall_thickness,
-            shrink: settings.shrink,
-            nozzle_diameter: settings.nozzle_diameter,
-            enable_slotify: settings.enable_slotify,
-            drop_unprintable_grids: settings.drop_unprintable_grids,
-            mirror_back: matches!(request.paste_side, PasteSide::Back),
-        },
-    )?;
+    let options = GeometryOptions {
+        clearance: settings.clearance,
+        wall_thickness: settings.wall_thickness,
+        shrink: settings.shrink,
+        nozzle_diameter: settings.nozzle_diameter,
+        enable_slotify: settings.enable_slotify,
+        drop_unprintable_grids: settings.drop_unprintable_grids,
+        mirror_back: matches!(request.paste_side, PasteSide::Back),
+    };
+    let geometry = if excluded_openings.is_empty() {
+        StencilGeometry::from_layers(&paste, &edge, options)?
+    } else {
+        StencilGeometry::from_layers_excluding(&paste, &edge, options, excluded_openings)?
+    };
     Ok((paste, edge, geometry))
 }
 
 #[tauri::command]
 fn preview_stencil(request: PreviewRequest) -> Result<PreviewResult, String> {
-    let (paste, edge, geometry) = geometry_for(&request)?;
+    let (paste, edge, geometry) = geometry_for(&request, &[])?;
     Ok(PreviewResult {
         paste: paste.stats(),
         edge: edge.stats(),
         model: PreviewModel {
             plate: geometry.plate,
             openings: geometry.openings,
+            selection_openings: geometry.selection_openings,
+            opening_sources: geometry.opening_sources,
             inner_wall: geometry.inner_wall,
             outer_wall: geometry.outer_wall,
             warnings: geometry.warnings,
@@ -216,8 +215,7 @@ fn save_export(
 }
 
 fn build_step_export(request: &ExportRequest) -> Result<StepExport, String> {
-    let (_, _, mut geometry) = geometry_for(&request.input)?;
-    exclude_openings(&mut geometry, &request.excluded_openings);
+    let (_, _, geometry) = geometry_for(&request.input, &request.excluded_openings)?;
     let settings = request.input.settings;
     let step = write_step(&geometry, settings.wall_height, settings.stencil_thickness)?;
     let stem = export_stem(&request.input.paste.filename);
@@ -228,8 +226,7 @@ fn build_step_export(request: &ExportRequest) -> Result<StepExport, String> {
 }
 
 fn build_stl_export(request: &ExportRequest) -> Result<StlExport, String> {
-    let (_, _, mut geometry) = geometry_for(&request.input)?;
-    exclude_openings(&mut geometry, &request.excluded_openings);
+    let (_, _, geometry) = geometry_for(&request.input, &request.excluded_openings)?;
     let settings = request.input.settings;
     let stl = write_stl(&geometry, settings.wall_height, settings.stencil_thickness)?;
     let stem = export_stem(&request.input.paste.filename);
@@ -254,18 +251,6 @@ fn save_stencil_stl(request: ExportRequest) -> Result<SaveResult, String> {
 
 fn export_stem(filename: &str) -> &str {
     filename.rsplit_once('.').map_or(filename, |(stem, _)| stem)
-}
-
-fn exclude_openings(geometry: &mut StencilGeometry, excluded: &[usize]) {
-    if excluded.is_empty() {
-        return;
-    }
-    geometry.openings = geometry
-        .openings
-        .drain(..)
-        .enumerate()
-        .filter_map(|(index, opening)| (!excluded.contains(&index)).then_some(opening))
-        .collect();
 }
 
 pub fn run() {
@@ -335,24 +320,6 @@ mod tests {
             invalid.validate().unwrap_err(),
             "Wall height must be positive."
         );
-    }
-
-    #[test]
-    #[ignore = "local profiling test"]
-    fn profiles_reported_production_archive() {
-        let path = std::path::Path::new(r"C:\Code\stryker-apv-sm\01_hardware\00_apv_sm_pcb\production\A3_x25\A3.zip");
-        let bytes = std::fs::read(path).unwrap();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let request = PreviewRequest {
-            paste: LayerSource { data: encoded.clone(), filename: "A3.zip".into(), is_zip: true },
-            edge: LayerSource { data: encoded, filename: "A3.zip".into(), is_zip: true },
-            settings: settings(),
-            paste_side: PasteSide::Front,
-        };
-        let started = std::time::Instant::now();
-        let result = preview_stencil(request);
-        eprintln!("profile result={:?} total={:?}", result.as_ref().map(|preview| (preview.paste.primitives, preview.edge.primitives, preview.model.openings.len())), started.elapsed());
-        result.unwrap();
     }
 
     #[test]
