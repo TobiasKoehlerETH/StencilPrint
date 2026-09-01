@@ -1,9 +1,13 @@
 use crate::gerber::{Aperture, MacroShape, ParsedLayer, Point, Primitive};
-use geo::{unary_union, Area, Buffer, Contains, Coord, LineString, Point as GeoPoint, Polygon};
+use geo::{
+    unary_union, Area, BooleanOps, Buffer, Contains, Coord, LineString, MultiPolygon,
+    Point as GeoPoint, Polygon,
+};
 use std::f64::consts::TAU;
 
 const CURVE_SEGMENTS: usize = 32;
 const OUTLINE_TOLERANCE: f64 = 0.01;
+const GEOMETRY_EPSILON: f64 = 1e-7;
 
 #[derive(Clone)]
 pub(crate) struct StencilGeometry {
@@ -11,28 +15,95 @@ pub(crate) struct StencilGeometry {
     pub openings: Vec<Vec<Point>>,
     pub inner_wall: Vec<Point>,
     pub outer_wall: Vec<Point>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GeometryOptions {
+    pub clearance: f64,
+    pub wall_thickness: f64,
+    pub shrink: f64,
+    pub nozzle_diameter: f64,
+    pub enable_slotify: bool,
+    pub drop_unprintable_grids: bool,
+    pub mirror_back: bool,
 }
 
 impl StencilGeometry {
     pub fn from_layers(
         paste: &ParsedLayer,
         edge: &ParsedLayer,
-        clearance: f64,
-        wall_thickness: f64,
+        options: GeometryOptions,
     ) -> Result<Self, String> {
+        let GeometryOptions {
+            clearance,
+            wall_thickness,
+            shrink,
+            nozzle_diameter,
+            enable_slotify,
+            drop_unprintable_grids,
+            mirror_back,
+        } = options;
         let board = outline_from_edge(edge, &paste.points())?;
         let inner_wall = offset_polygon(&board, clearance)?;
         let outer_wall = offset_polygon(&board, clearance + wall_thickness)?;
-        let openings = union_polygons(&primitive_polygons(paste));
+        let mut warnings = Vec::new();
+        let mut paste_polygons = primitive_polygons(paste);
+        if mirror_back {
+            mirror_polygons(&mut paste_polygons, &board);
+            warnings.push("Back paste mirrored around the board centre for registration.".into());
+        }
+        let raw_opening_count = paste_polygons.len();
+        let mut opening_polygons = union_polygons(&paste_polygons);
+        if opening_polygons.is_empty() {
+            return Err("The paste layer contains no printable pad openings.".into());
+        }
+
+        if shrink.abs() > GEOMETRY_EPSILON {
+            opening_polygons = offset_polygons(&opening_polygons, -shrink);
+            if opening_polygons.is_empty() {
+                return Err(
+                    "Shrink removed every paste opening. Use a smaller shrink value.".into(),
+                );
+            }
+            warnings.push(format!("Paste openings adjusted by {shrink:.2} mm shrink."));
+        }
+
+        let (compensated, compensation_applied) = compensate_for_nozzle(
+            &opening_polygons,
+            nozzle_diameter,
+            enable_slotify,
+            drop_unprintable_grids,
+        );
+        opening_polygons = compensated;
+        if compensation_applied {
+            warnings.push(format!(
+                "Nozzle compensation applied for a {nozzle_diameter:.2} mm nozzle."
+            ));
+        }
+
+        let (opening_polygons, clipped) = clip_openings(&opening_polygons, &inner_wall)?;
+        if clipped {
+            warnings.push("Paste geometry outside the board clearance was clipped.".into());
+        }
+        let openings = opening_polygons;
         if openings.is_empty() {
             return Err("The paste layer contains no printable pad openings.".into());
         }
         validate_openings(&inner_wall, &openings)?;
+        if raw_opening_count > openings.len() {
+            warnings.push(format!(
+                "{} overlapping or duplicate paste shapes were fused into {} openings.",
+                raw_opening_count,
+                openings.len()
+            ));
+        }
         Ok(Self {
             plate: outer_wall.clone(),
             openings,
             outer_wall,
             inner_wall,
+            warnings,
         })
     }
 }
@@ -58,11 +129,11 @@ fn outline_from_edge(edge: &ParsedLayer, _fallback: &[Point]) -> Result<Vec<Poin
 
     candidates
         .into_iter()
-        .filter(|points| polygon_area(points).abs() > 1e-9)
+        .filter(|points| signed_area(points).abs() > 1e-9)
         .max_by(|left, right| {
-            polygon_area(left)
+            signed_area(left)
                 .abs()
-                .partial_cmp(&polygon_area(right).abs())
+                .partial_cmp(&signed_area(right).abs())
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(ensure_ccw)
@@ -122,13 +193,13 @@ fn closed_outlines(segments: &[(Point, Point)]) -> Vec<Vec<Point>> {
 }
 
 fn ensure_ccw(mut polygon: Vec<Point>) -> Vec<Point> {
-    if polygon_area(&polygon) < 0.0 {
+    if signed_area(&polygon) < 0.0 {
         polygon.reverse();
     }
     polygon
 }
 
-fn polygon_area(points: &[Point]) -> f64 {
+pub(crate) fn signed_area(points: &[Point]) -> f64 {
     if points.len() < 3 {
         return 0.0;
     }
@@ -141,6 +212,10 @@ fn polygon_area(points: &[Point]) -> f64 {
         })
         .sum::<f64>()
         / 2.0
+}
+
+pub(crate) fn distance_squared(a: Point, b: Point) -> f64 {
+    (a.x - b.x).powi(2) + (a.y - b.y).powi(2)
 }
 
 fn points_are_close(a: Point, b: Point) -> bool {
@@ -167,7 +242,7 @@ fn offset_polygon(polygon: &[Point], distance: f64) -> Result<Vec<Point>, String
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|polygon| points_from_linestring(polygon.exterior()))
-        .filter(|points| polygon_area(points).abs() > 1e-9)
+        .filter(|points| signed_area(points).abs() > 1e-9)
         .ok_or_else(|| {
             "The board outline collapsed while applying clearance or wall thickness.".to_string()
         })?;
@@ -206,6 +281,23 @@ fn points_from_linestring(linestring: &LineString<f64>) -> Vec<Point> {
     points
 }
 
+fn mirror_polygons(polygons: &mut [Vec<Point>], board: &[Point]) {
+    let min_x = board
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::INFINITY, f64::min);
+    let max_x = board
+        .iter()
+        .map(|point| point.x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let centre_x = (min_x + max_x) / 2.0;
+    for polygon in polygons {
+        for point in polygon {
+            point.x = 2.0 * centre_x - point.x;
+        }
+    }
+}
+
 fn primitive_polygons(layer: &ParsedLayer) -> Vec<Vec<Point>> {
     let mut polygons = Vec::new();
     for primitive in &layer.primitives {
@@ -222,7 +314,7 @@ fn primitive_polygons(layer: &ParsedLayer) -> Vec<Vec<Point>> {
     }
     polygons
         .into_iter()
-        .filter(|polygon| polygon.len() >= 3 && polygon_area(polygon).abs() > 1e-9)
+        .filter(|polygon| polygon.len() >= 3 && signed_area(polygon).abs() > 1e-9)
         .collect()
 }
 
@@ -325,11 +417,119 @@ fn union_polygons(polygons: &[Vec<Point>]) -> Vec<Vec<Point>> {
     if shapes.is_empty() {
         return Vec::new();
     }
-    unary_union(shapes.iter())
+    rings_from_multi_polygon(unary_union(shapes.iter()))
+}
+
+fn offset_polygons(polygons: &[Vec<Point>], distance: f64) -> Vec<Vec<Point>> {
+    if distance.abs() <= GEOMETRY_EPSILON {
+        return polygons.to_vec();
+    }
+    let shapes = polygons
+        .iter()
+        .filter_map(|points| polygon_from_points(points))
+        .collect::<Vec<_>>();
+    if shapes.is_empty() {
+        return Vec::new();
+    }
+    rings_from_multi_polygon(unary_union(shapes.iter()).buffer(distance))
+}
+
+fn compensate_for_nozzle(
+    polygons: &[Vec<Point>],
+    nozzle_diameter: f64,
+    merge_close_pads: bool,
+    fill_unprintable_grids: bool,
+) -> (Vec<Vec<Point>>, bool) {
+    if nozzle_diameter <= GEOMETRY_EPSILON {
+        return (polygons.to_vec(), false);
+    }
+
+    let mut compensated = Vec::new();
+    let mut changed = false;
+    for polygon in polygons {
+        let Some(shape) = polygon_from_points(polygon) else {
+            continue;
+        };
+        let bounds = shape.exterior().0.iter().fold(
+            (
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+            ),
+            |(min_x, max_x, min_y, max_y), coordinate| {
+                (
+                    min_x.min(coordinate.x),
+                    max_x.max(coordinate.x),
+                    min_y.min(coordinate.y),
+                    max_y.max(coordinate.y),
+                )
+            },
+        );
+        let narrowest = (bounds.1 - bounds.0).min(bounds.3 - bounds.2);
+        let widen = ((nozzle_diameter - narrowest) / 2.0).max(0.0);
+        if widen > GEOMETRY_EPSILON {
+            changed = true;
+            compensated.extend(shape.buffer(widen).0);
+        } else {
+            compensated.push(shape);
+        }
+    }
+    if compensated.is_empty() {
+        return (Vec::new(), changed);
+    }
+
+    let mut combined = unary_union(compensated.iter());
+    if merge_close_pads {
+        let radius = nozzle_diameter / 2.0;
+        let merged = combined.buffer(radius).buffer(-radius);
+        if merged.0.len() != combined.0.len() {
+            changed = true;
+        }
+        combined = merged;
+    }
+
+    if fill_unprintable_grids {
+        let filled = fill_thin_grid_gaps(&combined, nozzle_diameter);
+        if filled.0.len() != combined.0.len() {
+            changed = true;
+        }
+        combined = filled;
+    }
+    (rings_from_multi_polygon(combined), changed)
+}
+
+fn fill_thin_grid_gaps(shape: &MultiPolygon<f64>, nozzle_diameter: f64) -> MultiPolygon<f64> {
+    let radius = nozzle_diameter / 2.0;
+    shape.buffer(radius).buffer(-radius)
+}
+
+fn clip_openings(
+    openings: &[Vec<Point>],
+    boundary: &[Point],
+) -> Result<(Vec<Vec<Point>>, bool), String> {
+    let opening_shapes = openings
+        .iter()
+        .filter_map(|points| polygon_from_points(points))
+        .collect::<Vec<_>>();
+    let boundary = polygon_from_points(boundary)
+        .ok_or_else(|| "The printable plate outline is degenerate.".to_string())?;
+    let source = unary_union(opening_shapes.iter());
+    let source_area = source.unsigned_area();
+    let clipped = source.intersection(&boundary);
+    let clipped_area = clipped.unsigned_area();
+    Ok((
+        rings_from_multi_polygon(clipped),
+        source_area - clipped_area > GEOMETRY_EPSILON,
+    ))
+}
+
+fn rings_from_multi_polygon(multi_polygon: MultiPolygon<f64>) -> Vec<Vec<Point>> {
+    multi_polygon
         .0
         .into_iter()
         .map(|polygon| points_from_linestring(polygon.exterior()))
-        .filter(|points| points.len() >= 3 && polygon_area(points).abs() > 1e-9)
+        .filter(|points| points.len() >= 3 && signed_area(points).abs() > GEOMETRY_EPSILON)
         .map(ensure_ccw)
         .collect()
 }
@@ -443,11 +643,32 @@ mod tests {
         ]
     }
 
+    fn options(
+        clearance: f64,
+        wall_thickness: f64,
+        nozzle_diameter: f64,
+        enable_slotify: bool,
+        drop_unprintable_grids: bool,
+        mirror_back: bool,
+    ) -> GeometryOptions {
+        GeometryOptions {
+            clearance,
+            wall_thickness,
+            shrink: 0.0,
+            nozzle_diameter,
+            enable_slotify,
+            drop_unprintable_grids,
+            mirror_back,
+        }
+    }
+
     #[test]
     fn builds_plate_wall_and_openings() {
         let paste = layer("paste.gtp", square(2.0, 2.0, 1.0));
         let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
-        let geometry = StencilGeometry::from_layers(&paste, &edge, 1.0, 2.0).unwrap();
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(1.0, 2.0, 0.4, true, true, false))
+                .unwrap();
 
         assert_eq!(geometry.openings.len(), 1);
         let plate_bounds = bounds(&geometry.plate).unwrap();
@@ -456,5 +677,58 @@ mod tests {
         assert!((plate_bounds.height() - outer_wall_bounds.height()).abs() < 1e-9);
         assert!(outer_wall_bounds.width() > 10.0);
         assert!(bounds(&geometry.inner_wall).unwrap().width() > 10.0);
+    }
+
+    #[test]
+    fn compensates_small_openings_and_merges_unprintable_gaps() {
+        let paste = ParsedLayer {
+            filename: "paste.gtp".into(),
+            units: "mm".into(),
+            primitives: vec![
+                Primitive::Region(square(2.0, 2.0, 0.2)),
+                Primitive::Region(square(2.3, 2.0, 0.2)),
+            ],
+            warnings: Vec::new(),
+        };
+        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
+
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.4, true, true, false))
+                .unwrap();
+
+        assert_eq!(geometry.openings.len(), 1);
+        assert!(geometry
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Nozzle compensation")));
+    }
+
+    #[test]
+    fn clips_paste_outside_the_board_clearance() {
+        let paste = layer("paste.gtp", square(9.5, 4.0, 2.0));
+        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
+        let geometry = StencilGeometry::from_layers(
+            &paste,
+            &edge,
+            options(0.0, 1.0, 0.4, false, false, false),
+        )
+        .unwrap();
+        assert!(geometry
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("clipped")));
+        assert!(geometry.openings[0].iter().all(|point| point.x <= 10.0001));
+    }
+
+    #[test]
+    fn mirrors_back_paste_around_board_centre() {
+        let paste = layer("paste.gtp", square(1.0, 2.0, 1.0));
+        let edge = layer("edge.gm1", square(0.0, 0.0, 10.0));
+        let geometry =
+            StencilGeometry::from_layers(&paste, &edge, options(0.0, 1.0, 0.0, false, false, true))
+                .unwrap();
+        let bounds = crate::gerber::bounds(&geometry.openings[0]).unwrap();
+        assert!((bounds.min_x - 8.0).abs() < 1e-6);
+        assert!((bounds.max_x - 9.0).abs() < 1e-6);
     }
 }

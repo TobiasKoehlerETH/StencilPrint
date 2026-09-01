@@ -1,4 +1,7 @@
-use crate::{geometry::StencilGeometry, gerber::Point};
+use crate::{
+    geometry::{distance_squared, signed_area, StencilGeometry},
+    gerber::Point,
+};
 
 const TRIANGLE_EPSILON: f64 = 1e-10;
 const RING_EPSILON: f64 = 1e-7;
@@ -38,6 +41,14 @@ pub(crate) fn write_stl(
         0.0,
         false,
     )?;
+    add_side_faces(
+        &mut triangles,
+        &clean_ring(&geometry.plate, true)?,
+        0.0,
+        stencil_thickness,
+    );
+    add_opening_sides(&mut triangles, &geometry.openings, 0.0, stencil_thickness)?;
+
     add_surface(
         &mut triangles,
         &geometry.outer_wall,
@@ -45,12 +56,6 @@ pub(crate) fn write_stl(
         -wall_height,
         false,
     )?;
-    add_side_faces(
-        &mut triangles,
-        &clean_ring(&geometry.plate, true)?,
-        0.0,
-        stencil_thickness,
-    );
     add_side_faces(
         &mut triangles,
         &clean_ring(&geometry.outer_wall, true)?,
@@ -63,8 +68,6 @@ pub(crate) fn write_stl(
         -wall_height,
         0.0,
     );
-    add_opening_sides(&mut triangles, &geometry.openings, 0.0, stencil_thickness)?;
-
     if triangles.is_empty() {
         return Err("The stencil produced no printable triangles.".into());
     }
@@ -246,22 +249,6 @@ fn normal(triangle: Triangle) -> [f64; 3] {
     }
 }
 
-fn signed_area(points: &[Point]) -> f64 {
-    points
-        .iter()
-        .enumerate()
-        .map(|(index, point)| {
-            let next = points[(index + 1) % points.len()];
-            point.x * next.y - next.x * point.y
-        })
-        .sum::<f64>()
-        / 2.0
-}
-
-fn distance_squared(a: Point, b: Point) -> f64 {
-    (a.x - b.x).powi(2) + (a.y - b.y).powi(2)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +269,7 @@ mod tests {
             openings: vec![square(1.0)],
             inner_wall: square(10.0),
             outer_wall: square(12.0),
+            warnings: Vec::new(),
         };
 
         let stl = write_stl(&geometry, 2.0, 0.4).expect("profiles should export");

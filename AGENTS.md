@@ -14,7 +14,8 @@ This file applies to the whole repository. Read it before changing code.
 ## Working rules
 
 - Keep browser-to-Rust request and response shapes synchronized. Rust uses Serde camel-case output; TypeScript interfaces use the same names.
-- Keep responsibilities in their existing modules. Parsing belongs in `gerber.rs`, polygon work in `geometry.rs`, and serialization in `step.rs`.
+- Keep responsibilities in their existing modules. Parsing belongs in `gerber.rs`, polygon work in `geometry.rs`, and serialization in `step.rs`/`stl.rs`.
+- Keep the frontend styling plain CSS in `src/styles.css`; avoid adding a utility-CSS dependency for isolated class names.
 - Prefer a small helper over repeated payload construction or repeated parsing, but do not add an abstraction used only once.
 - Do not edit `dist/`, `node_modules/`, `src-tauri/target/`, generated Tauri schemas, or lockfiles by hand.
 - Add focused tests beside Rust logic. Avoid snapshots for generated SVG or STEP output when a semantic assertion is clearer.

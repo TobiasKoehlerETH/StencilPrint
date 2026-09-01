@@ -1,4 +1,7 @@
-use crate::{geometry::StencilGeometry, gerber::Point};
+use crate::{
+    geometry::{distance_squared, signed_area, StencilGeometry},
+    gerber::Point,
+};
 use brepkit_io::step::write_step as write_brep_step;
 use brepkit_math::vec::Point3;
 use brepkit_operations::extrude::extrude;
@@ -6,7 +9,8 @@ use brepkit_topology::{builder::make_face_from_wire, builder::make_polygon_wire,
 
 const TOPOLOGY_TOLERANCE: f64 = 1e-7;
 
-/// Builds the two stencil solids and delegates STEP serialization to brepkit.
+/// Builds the stencil plate and continuous registration wall, then delegates
+/// STEP serialization to brepkit.
 ///
 /// The browser-facing geometry remains polygonal because it is also used by
 /// the Three.js preview. brepkit turns those clean planar profiles into
@@ -19,13 +23,6 @@ pub(crate) fn write_step(
     let mut topology = Topology::new();
     let plate_face = planar_face_with_holes(&mut topology, &geometry.plate, &geometry.openings)
         .map_err(|error| format!("Could not construct the stencil plate: {error}"))?;
-    let wall_face = planar_face_with_holes(
-        &mut topology,
-        &geometry.outer_wall,
-        std::slice::from_ref(&geometry.inner_wall),
-    )
-    .map_err(|error| format!("Could not construct the registration wall: {error}"))?;
-
     let plate = extrude(
         &mut topology,
         plate_face,
@@ -33,6 +30,12 @@ pub(crate) fn write_step(
         stencil_thickness,
     )
     .map_err(|error| format!("Could not extrude the stencil plate: {error}"))?;
+    let wall_face = planar_face_with_holes(
+        &mut topology,
+        &geometry.outer_wall,
+        std::slice::from_ref(&geometry.inner_wall),
+    )
+    .map_err(|error| format!("Could not construct the registration wall: {error}"))?;
     let wall = extrude(
         &mut topology,
         wall_face,
@@ -111,22 +114,6 @@ fn oriented_polygon(points: &[Point], counter_clockwise: bool) -> Result<Vec<Poi
     Ok(cleaned)
 }
 
-fn signed_area(points: &[Point]) -> f64 {
-    points
-        .iter()
-        .enumerate()
-        .map(|(index, point)| {
-            let next = points[(index + 1) % points.len()];
-            point.x * next.y - next.x * point.y
-        })
-        .sum::<f64>()
-        / 2.0
-}
-
-fn distance_squared(a: Point, b: Point) -> f64 {
-    (a.x - b.x).powi(2) + (a.y - b.y).powi(2)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +134,7 @@ mod tests {
             openings: vec![square(1.0)],
             inner_wall: square(10.0),
             outer_wall: square(12.0),
+            warnings: Vec::new(),
         };
 
         let step = write_step(&geometry, 2.0, 0.4).expect("profiles should export");

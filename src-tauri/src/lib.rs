@@ -3,7 +3,7 @@ mod gerber;
 mod step;
 mod stl;
 
-use geometry::StencilGeometry;
+use geometry::{GeometryOptions, StencilGeometry};
 use gerber::{parse_source, LayerKind, LayerSource, LayerStats, ParsedLayer, PasteSide};
 use serde::{Deserialize, Serialize};
 use step::write_step;
@@ -16,6 +16,10 @@ struct StencilSettings {
     wall_thickness: f64,
     wall_height: f64,
     stencil_thickness: f64,
+    shrink: f64,
+    nozzle_diameter: f64,
+    enable_slotify: bool,
+    drop_unprintable_grids: bool,
 }
 
 impl StencilSettings {
@@ -25,6 +29,7 @@ impl StencilSettings {
             ("Wall thickness", self.wall_thickness, false),
             ("Wall height", self.wall_height, false),
             ("Stencil thickness", self.stencil_thickness, false),
+            ("Nozzle diameter", self.nozzle_diameter, false),
         ];
         for (name, value, allows_zero) in dimensions {
             if !value.is_finite() || value < 0.0 || (!allows_zero && value == 0.0) {
@@ -37,6 +42,15 @@ impl StencilSettings {
                     }
                 ));
             }
+        }
+        if !(0.1..=0.8).contains(&self.nozzle_diameter) {
+            return Err("Nozzle diameter must be between 0.1 and 0.8 mm.".into());
+        }
+        if !(0.1..=0.6).contains(&self.stencil_thickness) {
+            return Err("Stencil thickness must be between 0.1 and 0.6 mm.".into());
+        }
+        if !(-0.2..=0.3).contains(&self.shrink) {
+            return Err("Shrink must be between -0.2 and 0.3 mm.".into());
         }
         Ok(())
     }
@@ -76,6 +90,7 @@ struct PreviewModel {
     openings: Vec<Vec<gerber::Point>>,
     inner_wall: Vec<gerber::Point>,
     outer_wall: Vec<gerber::Point>,
+    warnings: Vec<String>,
 }
 
 struct StepExport {
@@ -83,18 +98,16 @@ struct StepExport {
     step: String,
 }
 
+struct StlExport {
+    filename: String,
+    stl: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveResult {
     saved: bool,
     path: Option<String>,
-}
-
-#[derive(Serialize)]
-struct StlExportResult {
-    filename: String,
-    stl: String,
-    summary: Vec<String>,
 }
 
 fn parse_layers(request: &PreviewRequest) -> Result<(ParsedLayer, ParsedLayer), String> {
@@ -108,12 +121,27 @@ fn parse_layers(request: &PreviewRequest) -> Result<(ParsedLayer, ParsedLayer), 
 fn geometry_for(
     request: &PreviewRequest,
 ) -> Result<(ParsedLayer, ParsedLayer, StencilGeometry), String> {
+    let started = std::time::Instant::now();
     let (paste, edge) = parse_layers(request)?;
+    eprintln!(
+        "stencil profile parsed paste={} edge={} in {:?}",
+        paste.primitives.len(),
+        edge.primitives.len(),
+        started.elapsed()
+    );
+    let settings = request.settings;
     let geometry = StencilGeometry::from_layers(
         &paste,
         &edge,
-        request.settings.clearance,
-        request.settings.wall_thickness,
+        GeometryOptions {
+            clearance: settings.clearance,
+            wall_thickness: settings.wall_thickness,
+            shrink: settings.shrink,
+            nozzle_diameter: settings.nozzle_diameter,
+            enable_slotify: settings.enable_slotify,
+            drop_unprintable_grids: settings.drop_unprintable_grids,
+            mirror_back: matches!(request.paste_side, PasteSide::Back),
+        },
     )?;
     Ok((paste, edge, geometry))
 }
@@ -125,10 +153,11 @@ fn preview_stencil(request: PreviewRequest) -> Result<PreviewResult, String> {
         paste: paste.stats(),
         edge: edge.stats(),
         model: PreviewModel {
-            plate: geometry.plate.clone(),
-            openings: geometry.openings.clone(),
-            inner_wall: geometry.inner_wall.clone(),
-            outer_wall: geometry.outer_wall.clone(),
+            plate: geometry.plate,
+            openings: geometry.openings,
+            inner_wall: geometry.inner_wall,
+            outer_wall: geometry.outer_wall,
+            warnings: geometry.warnings,
         },
     })
 }
@@ -136,10 +165,28 @@ fn preview_stencil(request: PreviewRequest) -> Result<PreviewResult, String> {
 #[tauri::command]
 fn save_stencil_step(request: ExportRequest) -> Result<SaveResult, String> {
     let export = build_step_export(&request)?;
+    save_export(
+        "Save STEP stencil",
+        "STEP files",
+        &["step", "stp"],
+        &export.filename,
+        &export.step,
+        "step",
+    )
+}
+
+fn save_export(
+    title: &str,
+    filter: &str,
+    extensions: &[&str],
+    filename: &str,
+    content: &str,
+    default_extension: &str,
+) -> Result<SaveResult, String> {
     let Some(path) = rfd::FileDialog::new()
-        .set_title("Save STEP stencil")
-        .add_filter("STEP files", &["step", "stp"])
-        .set_file_name(&export.filename)
+        .set_title(title)
+        .add_filter(filter, extensions)
+        .set_file_name(filename)
         .save_file()
     else {
         return Ok(SaveResult {
@@ -152,14 +199,16 @@ fn save_stencil_step(request: ExportRequest) -> Result<SaveResult, String> {
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("step") || extension.eq_ignore_ascii_case("stp")
+            extensions
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
         }) {
         path
     } else {
-        path.with_extension("step")
+        path.with_extension(default_extension)
     };
-    std::fs::write(&path, export.step.as_bytes())
-        .map_err(|error| format!("Could not save STEP file to {}: {error}", path.display()))?;
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|error| format!("Could not save export to {}: {error}", path.display()))?;
     Ok(SaveResult {
         saved: true,
         path: Some(path.to_string_lossy().into_owned()),
@@ -178,22 +227,29 @@ fn build_step_export(request: &ExportRequest) -> Result<StepExport, String> {
     })
 }
 
-#[tauri::command]
-fn export_stencil_stl(request: ExportRequest) -> Result<StlExportResult, String> {
-    let (paste, _, mut geometry) = geometry_for(&request.input)?;
+fn build_stl_export(request: &ExportRequest) -> Result<StlExport, String> {
+    let (_, _, mut geometry) = geometry_for(&request.input)?;
     exclude_openings(&mut geometry, &request.excluded_openings);
     let settings = request.input.settings;
     let stl = write_stl(&geometry, settings.wall_height, settings.stencil_thickness)?;
     let stem = export_stem(&request.input.paste.filename);
-    Ok(StlExportResult {
+    Ok(StlExport {
         filename: format!("{stem}_stencil.stl"),
         stl,
-        summary: vec![
-            format!("{} paste objects", paste.primitives.len()),
-            format!("{} mm wall", settings.wall_height),
-            format!("{} mm clearance", settings.clearance),
-        ],
     })
+}
+
+#[tauri::command]
+fn save_stencil_stl(request: ExportRequest) -> Result<SaveResult, String> {
+    let export = build_stl_export(&request)?;
+    save_export(
+        "Save STL stencil",
+        "STL files",
+        &["stl"],
+        &export.filename,
+        &export.stl,
+        "stl",
+    )
 }
 
 fn export_stem(filename: &str) -> &str {
@@ -219,7 +275,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             preview_stencil,
             save_stencil_step,
-            export_stencil_stl
+            save_stencil_stl
         ])
         .run(tauri::generate_context!())
         .expect("error while running StencilPrint");
@@ -235,7 +291,11 @@ mod tests {
             clearance: 0.3,
             wall_thickness: 1.0,
             wall_height: 1.0,
-            stencil_thickness: 0.1,
+            stencil_thickness: 0.4,
+            shrink: 0.0,
+            nozzle_diameter: 0.2,
+            enable_slotify: true,
+            drop_unprintable_grids: true,
         }
     }
 
@@ -275,6 +335,24 @@ mod tests {
             invalid.validate().unwrap_err(),
             "Wall height must be positive."
         );
+    }
+
+    #[test]
+    #[ignore = "local profiling test"]
+    fn profiles_reported_production_archive() {
+        let path = std::path::Path::new(r"C:\Code\stryker-apv-sm\01_hardware\00_apv_sm_pcb\production\A3_x25\A3.zip");
+        let bytes = std::fs::read(path).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let request = PreviewRequest {
+            paste: LayerSource { data: encoded.clone(), filename: "A3.zip".into(), is_zip: true },
+            edge: LayerSource { data: encoded, filename: "A3.zip".into(), is_zip: true },
+            settings: settings(),
+            paste_side: PasteSide::Front,
+        };
+        let started = std::time::Instant::now();
+        let result = preview_stencil(request);
+        eprintln!("profile result={:?} total={:?}", result.as_ref().map(|preview| (preview.paste.primitives, preview.edge.primitives, preview.model.openings.len())), started.elapsed());
+        result.unwrap();
     }
 
     #[test]
@@ -325,7 +403,7 @@ mod tests {
         assert_eq!(export.filename, "prod_main_stencil.step");
         assert!(export.step.starts_with("ISO-10303-21;"));
         assert!(export.step.contains("ADVANCED_BREP_SHAPE_REPRESENTATION"));
-        assert_eq!(export.step.matches("MANIFOLD_SOLID_BREP").count(), 2);
+        assert_eq!(export.step.matches("MANIFOLD_SOLID_BREP").count(), 6);
         assert!(export.step.ends_with("END-ISO-10303-21;\n"));
 
         let back_step = build_step_export(&ExportRequest {
@@ -338,9 +416,9 @@ mod tests {
             excluded_openings: Vec::new(),
         })
         .expect("sample ZIP should export a back-paste STEP stencil");
-        assert_eq!(back_step.step.matches("MANIFOLD_SOLID_BREP").count(), 2);
+        assert_eq!(back_step.step.matches("MANIFOLD_SOLID_BREP").count(), 6);
 
-        let stl = export_stencil_stl(ExportRequest {
+        let stl = build_stl_export(&ExportRequest {
             input: PreviewRequest {
                 paste: sample_zip_source(),
                 edge: sample_zip_source(),
@@ -355,7 +433,7 @@ mod tests {
         assert!(stl.stl.contains("facet normal"));
         assert!(stl.stl.ends_with("endsolid stencil_print\n"));
 
-        let back_stl = export_stencil_stl(ExportRequest {
+        let back_stl = build_stl_export(&ExportRequest {
             input: PreviewRequest {
                 paste: sample_zip_source(),
                 edge: sample_zip_source(),
@@ -384,12 +462,12 @@ mod tests {
             settings: settings(),
             paste_side: PasteSide::Front,
         };
-        let full = export_stencil_stl(ExportRequest {
+        let full = build_stl_export(&ExportRequest {
             input,
             excluded_openings: Vec::new(),
         })
         .expect("inline Gerbers should export");
-        let removed = export_stencil_stl(ExportRequest {
+        let removed = build_stl_export(&ExportRequest {
             input: PreviewRequest {
                 paste: inline_source(
                     "paste.gtp",

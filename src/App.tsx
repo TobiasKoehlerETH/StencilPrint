@@ -1,15 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
-import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { Box, Download, FolderOpen, LoaderCircle, Printer, Settings2, Upload, X } from "lucide-react";
+import { Box, ChevronDown, Download, LoaderCircle, Settings2, Upload, X } from "lucide-react";
 import { Component, useEffect, useMemo, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
+import type { BufferGeometry, ExtrudeGeometry, Object3D } from "three";
 
 type LayerKind = "paste" | "edge";
 type PasteSide = "front" | "back";
 type BusyAction = "preview" | "step" | "stl";
+type ExportAction = Exclude<BusyAction, "preview">;
+type ExportCommand = "save_stencil_step" | "save_stencil_stl";
 
 interface LayerSource {
   data: string;
@@ -22,6 +22,10 @@ interface StencilSettings {
   wallThickness: number;
   wallHeight: number;
   stencilThickness: number;
+  shrink: number;
+  nozzleDiameter: number;
+  enableSlotify: boolean;
+  dropUnprintableGrids: boolean;
 }
 
 interface StencilRequest {
@@ -55,11 +59,20 @@ interface ViewBox {
   height: number;
 }
 
+interface ModelBounds {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  size: number;
+}
+
 interface ModelGeometry {
   plate: Point[];
   openings: Point[][];
   innerWall: Point[];
   outerWall: Point[];
+  warnings: string[];
 }
 
 interface PreviewResult {
@@ -73,20 +86,33 @@ interface SaveResult {
   path?: string;
 }
 
-interface StlExportResult {
-  filename: string;
-  stl: string;
-  summary: string[];
-}
-
 const DEFAULT_SETTINGS: StencilSettings = {
   clearance: 0.3,
   wallThickness: 1,
   wallHeight: 1,
-  stencilThickness: 0.1,
+  stencilThickness: 0.4,
+  shrink: 0,
+  nozzleDiameter: 0.2,
+  enableSlotify: true,
+  dropUnprintableGrids: true,
 };
 
 const GERBER_EXTENSIONS = [".gbr", ".ger", ".gtp", ".gbp", ".gko", ".gm1", ".pho", ".gbrjob", ".edge_cuts"];
+
+function classNames(...names: Array<string | false | undefined>) {
+  return names.filter(Boolean).join(" ");
+}
+
+function boundsForModel(model: ModelGeometry): ModelBounds {
+  const points = [model.outerWall, ...model.openings].flat();
+  const x = points.map((point) => point.x);
+  const y = points.map((point) => point.y);
+  const minX = Math.min(...x);
+  const maxX = Math.max(...x);
+  const minY = Math.min(...y);
+  const maxY = Math.max(...y);
+  return { minX, maxX, minY, maxY, size: Math.max(maxX - minX, maxY - minY, 1) };
+}
 
 function NumberField({
   label,
@@ -120,22 +146,42 @@ function NumberField({
   );
 }
 
+function ToggleField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <div className="switch-row">
+      <span>{label}</span>
+      <button
+        className={classNames("switch-control", value && "is-active")}
+        type="button"
+        role="switch"
+        aria-checked={value}
+        aria-label={label}
+        onClick={() => onChange(!value)}
+      >
+        <span />
+      </button>
+    </div>
+  );
+}
+
 function UniversalImport({ onFiles }: { onFiles: (files: File[]) => void }) {
   const takeFiles = (files: FileList | null) => {
     onFiles(Array.from(files ?? []));
   };
 
   return (
-    <>
-      <label className="command-icon" title="Import Gerbers or ZIP" aria-label="Import Gerbers or ZIP">
-        <Upload />
-        <input type="file" multiple accept={`${GERBER_EXTENSIONS.join(",")},.zip`} onChange={(event) => { takeFiles(event.currentTarget.files); event.currentTarget.value = ""; }} />
-      </label>
-      <label className="command-icon" title="Import folder" aria-label="Import folder">
-        <FolderOpen />
-        <input type="file" multiple accept={GERBER_EXTENSIONS.join(",")} onChange={(event) => { takeFiles(event.currentTarget.files); event.currentTarget.value = ""; }} {...({ webkitdirectory: "", directory: "" } as unknown as React.InputHTMLAttributes<HTMLInputElement>)} />
-      </label>
-    </>
+    <label className="command-icon" title="Import Gerbers or ZIP" aria-label="Import Gerbers or ZIP">
+      <Upload />
+      <input type="file" multiple accept={`${GERBER_EXTENSIONS.join(",")},.zip`} onChange={(event) => { takeFiles(event.currentTarget.files); event.currentTarget.value = ""; }} />
+    </label>
   );
 }
 
@@ -145,8 +191,19 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
+    const previewMount = mount;
 
-    try {
+    let cancelled = false;
+    let disposePreview: (() => void) | undefined;
+
+    async function loadPreview() {
+      try {
+        const [THREE, { OrbitControls }] = await Promise.all([
+          import("three"),
+          import("three/examples/jsm/controls/OrbitControls.js"),
+        ]);
+        if (cancelled) return;
+
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#ffffff");
     const camera = new THREE.PerspectiveCamera(32, 1, 0.01, 10000);
@@ -154,19 +211,14 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    mount.replaceChildren(renderer.domElement);
+    previewMount.replaceChildren(renderer.domElement);
 
     const modelGroup = new THREE.Group();
     scene.add(modelGroup);
 
-    const allPoints = [model.outerWall, ...model.openings].flat();
-    const minX = Math.min(...allPoints.map((point) => point.x));
-    const maxX = Math.max(...allPoints.map((point) => point.x));
-    const minY = Math.min(...allPoints.map((point) => point.y));
-    const maxY = Math.max(...allPoints.map((point) => point.y));
+    const { minX, maxX, minY, maxY, size } = boundsForModel(model);
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
-    const size = Math.max(maxX - minX, maxY - minY, 1);
 
     const pathFor = (points: Point[], reverse = false) => {
       const path = new THREE.Shape();
@@ -189,8 +241,8 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
     const plateMaterial = new THREE.MeshStandardMaterial({ color: 0x7bc8ee, roughness: 0.3, metalness: 0, side: THREE.DoubleSide });
     const plate = new THREE.Mesh(plateGeometry, plateMaterial);
     const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x164e78 });
-    const outlineGeometries: THREE.BufferGeometry[] = [];
-    const addProfileLines = (parent: THREE.Object3D, profiles: Point[][], z: number) => {
+    const outlineGeometries: BufferGeometry[] = [];
+    const addProfileLines = (parent: Object3D, profiles: Point[][], z: number) => {
       profiles.forEach((points) => {
         const lineGeometry = new THREE.BufferGeometry().setFromPoints(points.map((point) => new THREE.Vector3(point.x, point.y, z)));
         parent.add(new THREE.LineLoop(lineGeometry, edgeMaterial));
@@ -200,6 +252,8 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
     addProfileLines(plate, [model.plate, ...model.openings], settings.stencilThickness);
     modelGroup.add(plate);
 
+    const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x4fa6d8, roughness: 0.3, metalness: 0, side: THREE.DoubleSide });
+    const supportGeometries: ExtrudeGeometry[] = [];
     const wallShape = pathFor(model.outerWall);
     wallShape.holes.push(pathFor(model.innerWall, true));
     const wallGeometry = new THREE.ExtrudeGeometry(wallShape, {
@@ -207,11 +261,11 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
       bevelEnabled: false,
       curveSegments: 1,
     });
-    const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x4fa6d8, roughness: 0.3, metalness: 0, side: THREE.DoubleSide });
     const wall = new THREE.Mesh(wallGeometry, wallMaterial);
     wall.position.z = -settings.wallHeight;
     addProfileLines(wall, [model.outerWall, model.innerWall], settings.wallHeight);
     modelGroup.add(wall);
+    supportGeometries.push(wallGeometry);
     modelGroup.position.set(-centerX, -centerY, 0);
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x52606d, 2.1));
@@ -233,15 +287,15 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
     controls.update();
 
     const resize = () => {
-      const width = mount.clientWidth;
-      const height = mount.clientHeight;
+      const width = previewMount.clientWidth;
+      const height = previewMount.clientHeight;
       if (!width || !height) return;
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height, false);
     };
     const observer = new ResizeObserver(resize);
-    observer.observe(mount);
+    observer.observe(previewMount);
     resize();
 
     let animationFrame = 0;
@@ -252,27 +306,40 @@ function ThreePreview({ model, settings }: { model: ModelGeometry; settings: Ste
     };
     animate();
 
-    return () => {
+    disposePreview = () => {
       cancelAnimationFrame(animationFrame);
       observer.disconnect();
       controls.dispose();
       plateGeometry.dispose();
-      wallGeometry.dispose();
+      supportGeometries.forEach((geometry) => geometry.dispose());
       outlineGeometries.forEach((geometry) => geometry.dispose());
       edgeMaterial.dispose();
       plateMaterial.dispose();
       wallMaterial.dispose();
       renderer.dispose();
-      mount.replaceChildren();
+      previewMount.replaceChildren();
     };
-    } catch (error) {
+      } catch (error) {
+        if (cancelled) return;
       console.error("3D preview failed", error);
-      mount.replaceChildren();
+      previewMount.replaceChildren();
       const fallback = document.createElement("div");
       fallback.className = "empty-state";
-      fallback.innerHTML = `<strong>3D preview unavailable</strong><span>${error instanceof Error ? error.message : "WebGL could not render this model"}</span>`;
-      mount.append(fallback);
+      const title = document.createElement("strong");
+      title.textContent = "3D preview unavailable";
+      const detail = document.createElement("span");
+      detail.textContent = error instanceof Error ? error.message : "WebGL could not render this model";
+      fallback.append(title, detail);
+      previewMount.append(fallback);
+      }
     }
+
+    void loadPreview();
+
+    return () => {
+      cancelled = true;
+      disposePreview?.();
+    };
   }, [model, settings.stencilThickness, settings.wallHeight]);
 
   return <div ref={mountRef} className="three-stage" aria-label="Interactive 3D stencil preview" />;
@@ -289,11 +356,7 @@ function TwoDPreview({
   onToggleOpening: (index: number) => void;
   onRestoreOpenings: () => void;
 }) {
-  const allPoints = [model.outerWall, ...model.openings].flat();
-  const minX = Math.min(...allPoints.map((point) => point.x));
-  const maxX = Math.max(...allPoints.map((point) => point.x));
-  const minY = Math.min(...allPoints.map((point) => point.y));
-  const maxY = Math.max(...allPoints.map((point) => point.y));
+  const { minX, maxX, minY, maxY } = boundsForModel(model);
   const width = Math.max(maxX - minX, 1);
   const height = Math.max(maxY - minY, 1);
   const padding = Math.max(Math.min(width, height) * 0.06, 1);
@@ -408,7 +471,7 @@ function TwoDPreview({
             return (
               <polygon
                 key={index}
-                className={cn("opening", removed && "is-removed")}
+                className={classNames("opening", removed && "is-removed")}
                 points={pointsFor(opening)}
                 role="button"
                 tabIndex={0}
@@ -491,6 +554,7 @@ export function App() {
   const [viewMode, setViewMode] = useState<"3d" | "2d">("3d");
   const [pasteSide, setPasteSide] = useState<PasteSide>("front");
   const [removedOpenings, setRemovedOpenings] = useState<Set<number>>(() => new Set());
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   useEffect(() => {
     if (import.meta.env.DEV) return;
@@ -598,34 +662,27 @@ export function App() {
   }
 
   async function exportStep() {
-    if (!request || busy) return;
-    setBusy("step");
-    setNoticeError(false);
-    setNotice("Exporting…");
-    try {
-      const result = await invoke<SaveResult>("save_stencil_step", {
-        request: { ...request, excludedOpenings: [...removedOpenings] },
-      });
+    await runExport<SaveResult>("step", "save_stencil_step", (result) => {
       setNotice(result.saved ? "STEP saved" : "Export cancelled");
-    } catch (error) {
-      setNoticeError(true);
-      setNotice(errorMessage(error));
-    } finally {
-      setBusy(null);
-    }
+    });
   }
 
   async function exportStl() {
+    await runExport<SaveResult>("stl", "save_stencil_stl", (result) => {
+      setNotice(result.saved ? "STL saved" : "Export cancelled");
+    });
+  }
+
+  async function runExport<T>(action: ExportAction, command: ExportCommand, onSuccess: (result: T) => void) {
     if (!request || busy) return;
-    setBusy("stl");
+    setBusy(action);
     setNoticeError(false);
     setNotice("Exporting…");
     try {
-      const result = await invoke<StlExportResult>("export_stencil_stl", {
+      const result = await invoke<T>(command, {
         request: { ...request, excludedOpenings: [...removedOpenings] },
       });
-      downloadStl(result);
-      setNotice("STL saved");
+      onSuccess(result);
     } catch (error) {
       setNoticeError(true);
       setNotice(errorMessage(error));
@@ -656,6 +713,7 @@ export function App() {
     setNoticeError(false);
     setNotice("Drop files to begin");
     setViewMode("3d");
+    setExportMenuOpen(false);
   }
 
   const fileTitle = layers.paste?.filename ?? layers.edge?.filename ?? "Untitled stencil";
@@ -670,7 +728,7 @@ export function App() {
 
   return (
     <main
-      className={cn(dashboard ? "app-shell" : "welcome-screen", dragging && "is-dragging")}
+      className={classNames(dashboard ? "app-shell" : "welcome-screen", dragging && "is-dragging")}
       style={dashboard ? ({ "--sidebar-width": sidebarOpen ? "34rem" : "0px" } as React.CSSProperties) : undefined}
       onDragEnter={(event) => {
         event.preventDefault();
@@ -706,7 +764,7 @@ export function App() {
           <aside className="app-rail" aria-label="Stencil navigation">
             <div className="app-rail-group">
               <button
-                className={cn("app-rail-tool", sidebarOpen && "is-active")}
+                className={classNames("app-rail-tool", sidebarOpen && "is-active")}
                 type="button"
                 aria-label="Toggle settings"
                 aria-pressed={sidebarOpen}
@@ -736,18 +794,24 @@ export function App() {
                   </div>
 
                   <div className="sidebar-divider" />
+                  <div className="workspace-sidebar-column-heading"><span>Printability</span><small>COMPENSATION</small></div>
+                  <div className="inspector-section">
+                    <NumberField label="Shrink" value={settings.shrink} min={-0.2} step={0.05} onChange={(shrink) => patchSettings({ shrink })} />
+                    <NumberField label="Nozzle" value={settings.nozzleDiameter} min={0.1} step={0.05} onChange={(nozzleDiameter) => patchSettings({ nozzleDiameter })} />
+                    <ToggleField label="Merge close pads" value={settings.enableSlotify} onChange={(enableSlotify) => patchSettings({ enableSlotify })} />
+                    <ToggleField label="Fill thin grids" value={settings.dropUnprintableGrids} onChange={(dropUnprintableGrids) => patchSettings({ dropUnprintableGrids })} />
+                  </div>
+
+                  <div className="sidebar-divider" />
                   <div className="workspace-sidebar-column-heading"><span>Inputs</span></div>
                   <div className="inspector-section source-list">
                     <div className="paste-side-row">
                       <span>Paste side</span>
                       <div className="paste-side-toggle" role="group" aria-label="Paste side">
-                        <button className={cn(pasteSide === "front" && "is-active")} type="button" aria-pressed={pasteSide === "front"} onClick={() => setPasteSide("front")}>F.Paste</button>
-                        <button className={cn(pasteSide === "back" && "is-active")} type="button" aria-pressed={pasteSide === "back"} onClick={() => setPasteSide("back")}>B.Paste</button>
+                        <button className={classNames(pasteSide === "front" && "is-active")} type="button" aria-pressed={pasteSide === "front"} onClick={() => setPasteSide("front")}>F.Paste</button>
+                        <button className={classNames(pasteSide === "back" && "is-active")} type="button" aria-pressed={pasteSide === "back"} onClick={() => setPasteSide("back")}>B.Paste</button>
                       </div>
                     </div>
-                    <div className="source-row"><span>{pasteSide === "front" ? "F.Paste" : "B.Paste"}</span><strong title={preview?.paste.filename ?? layers.paste?.filename}>{preview?.paste.filename ?? layers.paste?.filename ?? "Not loaded"}</strong></div>
-                    <div className="source-row"><span>Edge cuts</span><strong title={layers.edge?.filename}>{layers.edge?.filename ?? "Not loaded"}</strong></div>
-                    <p className="source-hint">{preview ? `${preview.edge.widthMm.toFixed(1)} × ${preview.edge.heightMm.toFixed(1)} mm board` : "Add both layers to build the stencil."}</p>
                   </div>
                 </section>
 
@@ -756,21 +820,23 @@ export function App() {
                   <div className="inspector-section">
                     <span className="inspector-label">Preview</span>
                     <div className="view-mode-group">
-                      <button className={cn("view-mode-button", viewMode === "3d" && "is-active")} type="button" aria-label="3D preview" title="3D preview" aria-pressed={viewMode === "3d"} onClick={() => setViewMode("3d")}>
+                      <button className={classNames("view-mode-button", viewMode === "3d" && "is-active")} type="button" aria-label="3D preview" title="3D preview" aria-pressed={viewMode === "3d"} onClick={() => setViewMode("3d")}>
                         3d
                       </button>
-                      <button className={cn("view-mode-button", viewMode === "2d" && "is-active")} type="button" aria-label="2D preview" title="2D preview" aria-pressed={viewMode === "2d"} onClick={() => setViewMode("2d")}>
+                      <button className={classNames("view-mode-button", viewMode === "2d" && "is-active")} type="button" aria-label="2D preview" title="2D preview" aria-pressed={viewMode === "2d"} onClick={() => setViewMode("2d")}>
                         2d
                       </button>
                     </div>
                   </div>
                   <div className="sidebar-divider" />
                   <div className="workspace-sidebar-column-heading"><span>Build</span></div>
-                  <div className="inspector-section inspector-actions">
-                    <button className="inspector-action" type="button" disabled={!request || busy !== null} onClick={() => void renderPreview()}>
-                      {busy === "preview" ? <LoaderCircle className="spin" /> : <LoaderCircle />}
-                      <span>Rebuild preview</span>
-                    </button>
+                  <div className="inspector-section">
+                    {preview?.model.warnings.length ? (
+                      <div className="geometry-notes" role="note">
+                        <strong>Engine notes</strong>
+                        {preview.model.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+                      </div>
+                    ) : null}
                   </div>
                 </section>
               </div>
@@ -781,14 +847,29 @@ export function App() {
             <header className="command-bar">
               <div className="file-name" title={fileTitle}>{fileTitle}</div>
               <div className="command-actions">
-                {notice && notice !== "Ready" && <span className={cn("command-status", noticeError && "is-error")} role="status" aria-live="polite">{notice}</span>}
+                {notice && notice !== "Ready" && <span className={classNames("command-status", noticeError && "is-error")} role="status" aria-live="polite">{notice}</span>}
                 <UniversalImport onFiles={importFiles} />
-                <button className="command-icon" type="button" aria-label="Export STL" title="Export STL for slicing" disabled={!preview || busy !== null} onClick={() => void exportStl()}>
-                  {busy === "stl" ? <LoaderCircle className="spin" /> : <Printer />}
-                </button>
-                <button className="command-icon" type="button" aria-label="Export STEP" title="Export STEP for CAD" disabled={!preview || busy !== null} onClick={() => void exportStep()}>
-                  {busy === "step" ? <LoaderCircle className="spin" /> : <Download />}
-                </button>
+                <div className="export-menu">
+                  <button
+                    className="command-icon"
+                    type="button"
+                    aria-label="Export stencil"
+                    aria-haspopup="menu"
+                    aria-expanded={exportMenuOpen}
+                    title="Export stencil"
+                    disabled={!preview || busy !== null}
+                    onClick={() => setExportMenuOpen((open) => !open)}
+                  >
+                    {busy === "step" || busy === "stl" ? <LoaderCircle className="spin" /> : <Download />}
+                    <ChevronDown className="export-menu-chevron" />
+                  </button>
+                  {exportMenuOpen && (
+                    <div className="export-menu-options" role="menu" aria-label="Export format">
+                      <button type="button" role="menuitem" onClick={() => { setExportMenuOpen(false); void exportStl(); }}>STL</button>
+                      <button type="button" role="menuitem" onClick={() => { setExportMenuOpen(false); void exportStep(); }}>STEP</button>
+                    </div>
+                  )}
+                </div>
               </div>
             </header>
 
@@ -839,19 +920,6 @@ function readFile(file: File, isZip: boolean): Promise<string> {
     if (isZip) reader.readAsDataURL(file);
     else reader.readAsText(file);
   });
-}
-
-function downloadStl(result: StlExportResult) {
-  downloadText(result.filename, result.stl, "model/stl");
-}
-
-function downloadText(filename: string, content: string, type: string) {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
 }
 
 function errorMessage(error: unknown) {
