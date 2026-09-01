@@ -861,7 +861,7 @@ export function App() {
                     onClick={() => setExportMenuOpen((open) => !open)}
                   >
                     {busy === "step" || busy === "stl" ? <LoaderCircle className="spin" /> : <Download />}
-                    <ChevronDown className="export-menu-chevron" />
+                    {exportMenuOpen && <ChevronDown className="export-menu-chevron" />}
                   </button>
                   {exportMenuOpen && (
                     <div className="export-menu-options" role="menu" aria-label="Export format">
